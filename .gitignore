@@ -1,0 +1,27 @@
+# 发布产物（PyInstaller 打包的 exe）
+/release
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Node.js
+node_modules/
+
+# 构建产物（PyInstaller 中间文件 + 前端 dist）
+backend/build/
+backend/dist/
+*.spec
+
+# IDE 配置
+.idea/
+
+# 操作系统
+Thumbs.db
+.DS_Store
+
+# 日志
+*.log
