@@ -82,6 +82,7 @@ watch(excelContent, (newVal) => {
 
 // ===== 暗黑模式 (Dark Mode) =====
 // 初始化暗黑主题状态
+const showTutorial = ref(false)
 const isDarkMode = ref(localStorage.getItem('marktrans_theme') === 'dark')
 
 // 监听主题切换，改变 HTML 属性并保持本地存储，同时联动 Vditor
@@ -417,7 +418,7 @@ onUnmounted(() => {
     <!-- ================= 顶部全局导航栏 ================= -->
     <header class="global-navbar">
       <div class="logo-area">
-        <span class="logo-text">MarkTrans</span>
+        <span class="logo-text" @click="showTutorial = true" title="点击查看使用教程">MarkTrans</span>
         <button class="theme-toggle-btn" @click="isDarkMode = !isDarkMode" :title="isDarkMode ? '切换至亮色模式' : '切换至夜间模式'">
           {{ isDarkMode ? '☀️' : '🌙' }}
         </button>
@@ -572,6 +573,40 @@ onUnmounted(() => {
           <button class="send-btn" :disabled="isAiLoading || !aiInput.trim()" @click="sendAiMessage">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path></svg>
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================= 使用教程弹窗 ================= -->
+    <div v-show="showTutorial" class="tutorial-overlay" @click.self="showTutorial = false">
+      <div class="tutorial-modal">
+        <div class="tutorial-header">
+          <h2>🚀 MarkTrans 核心使用指南</h2>
+          <button class="close-btn" @click="showTutorial = false">✖</button>
+        </div>
+        <div class="tutorial-content">
+          <h3>1. 👨‍💻 模式一：Markdown 编辑与终态导出（代码流）</h3>
+          <ul>
+            <li><strong>一键多格式导出：</strong> 在右侧预览区右上角，可由源码一键提取为 <strong>PDF、Word、HTML 以及 PPT</strong>。</li>
+            <li><strong>PPT 分页技巧：</strong> 导出 PPT 时，系统按一级标题(<code>#</code>)或二级标题(<code>##</code>)自动切页，你也可使用分割线(<code>---</code>)强行分页。勾选右上方【PPT 辅助线】可实时查看分页断层。</li>
+          </ul>
+
+          <h3>2. 🎨 模式二：文字转 Markdown（富文本流）</h3>
+          <ul>
+            <li><strong>逆向剥离：</strong> 点击左上的【导入文件】，上传别人的 `.docx` Word 文档，它会在底层被瞬间洗成极其极其纯净的 Markdown 源码！</li>
+            <li><strong>纯离线防丢图：</strong> 直接 Ctrl+V 粘贴电脑截图，图片会被瞬间提取为 <strong>Base64 编码文本</strong>写进底层。告别图床，完全离线化阅读。</li>
+          </ul>
+
+          <h3>3. 📊 模式三：Markdown 转 Excel（数据流）</h3>
+          <ul>
+            <li>将混杂在文字中的 Markdown 表格粘贴进来，系统会自动屏蔽多余废话，一键精准剥离成 <code>.xlsx</code> 或 <code>.csv</code> 文件。</li>
+          </ul>
+
+          <h3>4. ✨ AI Co-pilot 与暗黑模式</h3>
+          <ul>
+            <li>点击最左下角的魔法棒唤出面板，在 ⚙️ 设置中输入提供商的 API 即可使用沉浸式 AI 问答，支持文本代码一键复制。</li>
+            <li>点击顶部 🌙 图标，即可开启全局联动的极客护眼模式。</li>
+          </ul>
         </div>
       </div>
     </div>
@@ -1208,4 +1243,76 @@ html[data-theme="dark"] .ai-input-area { background: transparent; border-color: 
 html[data-theme="dark"] .input-wrapper { background: #2d2d30; }
 html[data-theme="dark"] .input-wrapper textarea { color: #fff; }
 html[data-theme="dark"] .ai-copy-btn { background: #333; border-color: #444; color: #ccc; }
+
+/* ================= Logo 交互与教程弹窗 ================= */
+.logo-text {
+  cursor: pointer;
+  transition: transform 0.2s, color 0.2s;
+  user-select: none;
+}
+.logo-text:hover {
+  transform: scale(1.05);
+  color: #0072ff;
+}
+
+.tutorial-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(6px);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn 0.3s ease-out;
+}
+
+.tutorial-modal {
+  background: #fff;
+  width: 650px;
+  max-width: 90vw;
+  max-height: 85vh;
+  border-radius: 16px;
+  box-shadow: 0 15px 50px rgba(0,0,0,0.2);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: slideUp 0.3s ease-out;
+}
+
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes slideUp { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: translateY(0); } }
+
+.tutorial-header {
+  padding: 16px 24px;
+  background: #f8f9fa;
+  border-bottom: 1px solid #eaeaea;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.tutorial-header h2 { margin: 0; font-size: 18px; color: #333; }
+.tutorial-header .close-btn { background: none; border: none; font-size: 20px; cursor: pointer; color: #888; transition: color 0.2s; }
+.tutorial-header .close-btn:hover { color: #ff4757; }
+
+.tutorial-content {
+  padding: 24px 30px;
+  overflow-y: auto;
+  line-height: 1.7;
+  color: #444;
+  font-size: 14px;
+}
+.tutorial-content h3 { color: #0072ff; margin-top: 25px; margin-bottom: 12px; font-size: 16px; border-bottom: 1px solid #eee; padding-bottom: 5px; }
+.tutorial-content h3:first-child { margin-top: 0; }
+.tutorial-content ul { padding-left: 20px; margin: 0; }
+.tutorial-content li { margin-bottom: 8px; }
+.tutorial-content strong { color: #222; }
+
+/* 教程暗黑模式适配 */
+html[data-theme="dark"] .tutorial-modal { background: #1e1e1e; border: 1px solid #333; }
+html[data-theme="dark"] .tutorial-header { background: #252526; border-color: #333; }
+html[data-theme="dark"] .tutorial-header h2 { color: #eee; }
+html[data-theme="dark"] .tutorial-content { color: #ccc; }
+html[data-theme="dark"] .tutorial-content h3 { color: #61dafb; border-color: #333; }
+html[data-theme="dark"] .tutorial-content strong { color: #eee; }
 </style>
