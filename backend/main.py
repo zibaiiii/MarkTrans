@@ -133,6 +133,7 @@ class Api:
             'html': ('html', '.html'),
             'docx': ('docx', '.docx'),
             'pdf': ('pdf', '.pdf'),
+            'pptx': ('pptx', '.pptx'),
         }
 
         if file_type not in format_map:
@@ -158,18 +159,31 @@ class Api:
         temp_files = []
         try:
             if file_type == 'pdf':
-                # PDF 需要 LaTeX 引擎（如 xelatex/wkhtmltopdf）。
-                # xelatex 支持系统 TrueType 字体；指定 mainfont 为微软雅黑
-                # （含完整中文字形），解决默认字体缺中文字形导致中文变空白的问题。
+                # 针对 PDF 导出的终极中文排版修复：
+                # CJKmainfont 会自动触发 xeCJK 宏包，解决中文段落不自动换行、
+                # 文字冲出页面右侧边界的严重问题（mainfont 不会触发 xeCJK）。
+                pdf_args = [
+                    '--pdf-engine=xelatex',              # 强制使用支持 Unicode 的 XeLaTeX 引擎
+                    '-V', 'geometry:margin=1in',         # 设置标准的 1 英寸页面边距
+                    '-V', 'CJKmainfont=Microsoft YaHei', # 核心：指定微软雅黑，自动触发 xeCJK 解决中文不换行冲出边界的问题
+                    '--wrap=preserve'                    # 保持代码块等内容的格式
+                ]
                 pypandoc.convert_text(
                     markdown_content,
                     to=to_format,
                     format=INPUT_FORMAT,
                     outputfile=save_path,
-                    extra_args=[
-                        '--pdf-engine=xelatex',
-                        '-V', 'mainfont=Microsoft YaHei',
-                    ],
+                    extra_args=pdf_args,
+                )
+            elif file_type == 'pptx':
+                # 修复幻灯片粘连 Bug：强制指定滑动层级为 2（即 ## 作为新一页的标准）
+                pptx_args = ['--slide-level=2']
+                pypandoc.convert_text(
+                    markdown_content,
+                    'pptx',
+                    format='markdown',
+                    outputfile=save_path,
+                    extra_args=pptx_args,
                 )
             elif file_type == 'html':
                 # 导出 HTML：输出完整 standalone 文档 + MathJax 公式 + GitHub Markdown CSS
@@ -259,6 +273,44 @@ class Api:
                 except OSError:
                     pass
 
+    def chat_with_ai(self, base_url, api_key, model, messages):
+        """通过 Python 后端代理调用大模型接口，规避浏览器跨域 (CORS) 限制。
+
+        使用标准库 urllib，无需引入额外依赖。返回 {success, reply} 或 {success, error}。
+        """
+        import urllib.request
+        import json
+
+        # 补全标准 OpenAI 兼容的路径后缀
+        endpoint = base_url.rstrip('/')
+        if not endpoint.endswith('/chat/completions'):
+            endpoint += '/chat/completions'
+
+        data = json.dumps({
+            "model": model,
+            "messages": messages
+        }).encode('utf-8')
+
+        req = urllib.request.Request(endpoint, data=data)
+        req.add_header('Content-Type', 'application/json')
+        # 部分特定平台可能要求不同的 Auth 格式，默认走标准的 Bearer
+        req.add_header('Authorization', f'Bearer {api_key}')
+
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                return {"success": True, "reply": result['choices'][0]['message']['content']}
+        except Exception as e:
+            error_msg = str(e)
+            # 尝试读取具体的接口报错信息（如 401 鉴权失败，404 不存在等）
+            if hasattr(e, 'read'):
+                try:
+                    detail = e.read().decode('utf-8')
+                    error_msg += f"\n详细信息: {detail}"
+                except:
+                    pass
+            return {"success": False, "error": error_msg}
+
 
 def get_resource_path():
     """获取前端打包产物的入口 HTML 路径（兼容开发环境与 PyInstaller 打包环境）。
@@ -297,13 +349,14 @@ def main():
     html_path = get_resource_path()
 
     # 创建窗口：标题与打包产物名一致；保留最小尺寸约束提升体验
+    # 创建窗口，设定黄金比例 1440x900，并限制最小尺寸
     webview.create_window(
         'MarkTrans',
         url=html_path,
         js_api=api,
-        width=1280,
-        height=850,
-        min_size=(800, 500),
+        width=1024,
+        height=700,
+        min_size=(1024, 700),
     )
 
     # 关键：debug=False 彻底关闭开发者工具弹窗（正式发布）

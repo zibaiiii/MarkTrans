@@ -1,78 +1,190 @@
-# 🚀 MarkTrans - 桌面级多功能 Markdown 工作台
+# MarkTrans — LaTeX Markdown 桌面工作台
 
-**MarkTrans** 是一款基于 Vue3 + Python (Pywebview) 构建的现代化双向 Markdown 桌面客户端。打破传统编辑器的单一形态，提供“代码流”、“富文本流”与“数据流”三大工作模式，致力于为开发者、科研人员和创作者提供极致的本地化文档处理体验。
+基于 **Vue 3 + Python (pywebview)** 构建的离线优先 Markdown 桌面应用。集编辑、预览、多格式导出、AI 助手于一体，支持 LaTeX 公式、暗黑模式、自动保存，可一键打包为独立 `.exe`。
 
 ![Vue3](https://img.shields.io/badge/Frontend-Vue3-42b883?style=flat-square&logo=vuedotjs)
 ![Python](https://img.shields.io/badge/Backend-Python3-3776ab?style=flat-square&logo=python)
-![Pywebview](https://img.shields.io/badge/UI_Container-Pywebview-ffc107?style=flat-square)
+![Pywebview](https://img.shields.io/badge/Desktop-Pywebview-ffc107?style=flat-square)
 ![Vditor](https://img.shields.io/badge/Editor-Vditor-blue?style=flat-square)
 
 ---
 
-## ✨ 核心功能与三大模式
+## 三大工作模式
 
-### 👨‍💻 模式一：Markdown 编辑与导出（代码流）
-纯净的极客输入环境，左侧书写 Markdown 源码，右侧实时 pro-typography 沉浸式绝美预览。
-*   **全格式支持**：支持完整的 Markdown 语法及 KaTeX 复杂数学公式。
-*   **一键终态导出**：内置 Pandoc 引擎，支持将 Markdown 无损导出为 **HTML、Word (.docx) 和 PDF** 文件。
+### 模式一：Markdown 编辑与导出
 
-### 🎨 模式二：富文本转 Markdown（提效流）
-极其丝滑的所见即所得 (WYSIWYG) 富文本环境，像使用 Word 一样排版，但底层自动生成标准 Markdown 源码！
-*   **逆向解析黑科技 (Word 转 MD)**：点击导入本地 `.docx` 文件，秒级剥离格式并在后台转化为干净的 Markdown 代码！
-*   **免图床图片直出**：直接拖拽或 `Ctrl+V` 粘贴截图，图片瞬间转化为 **Base64 纯文本编码**嵌入文档。从此告别链接失效、图文分离，实现彻底的离线化！
-*   **快捷排版**：输入 `$$` 唤出原生公式编辑器，悬停提示原生快捷键（Ctrl+B 加粗等）。
+左右双卡片布局，左侧书写源码，右侧实时预览（Typora 风格排版 + KaTeX 公式渲染）。
 
-### 📊 模式三：Markdown 转 Excel（数据流）
-数据处理专精模式。日常收集的 Markdown 表格，一键剥离！
-*   **智能屏蔽**：自动忽略输入区的所有非表格文字。
-*   **秒转表格**：借助后端的 Pandas 引擎，将 Markdown 表格一键提取并存为 **Excel (.xlsx) 或 CSV** 文件。
+- **四格式导出**：HTML / Word (.docx) / PDF / PowerPoint (.pptx)
+- **PPT 分页辅助线**：开关开启后，预览区以红色断层线标示 `##` 标题和 `---` 分割线对应的幻灯片分页位置
+- **PDF 中文排版**：XeLaTeX 引擎 + `CJKmainfont=Microsoft YaHei` + `geometry:margin=1in`，彻底解决中文冲出页面边界的 Bug
+- **PPT 幻灯片切页**：`--slide-level=2` 强制按二级标题分页，避免内容粘连
+- **虚线上传区**：点击导入本地 `.md` / `.txt` / `.docx` 文件（Word 自动转 Markdown）
+
+### 模式二：文字转 Markdown（Vditor 富文本）
+
+所见即所得编辑器，像 Word 一样排版，底层自动生成标准 Markdown。
+
+- **拖拽/粘贴图片**：自动转 Base64 嵌入文档，无需图床，永不离线失效
+- **快捷公式**：输入 `$$` 唤出公式编辑器，`Ctrl+B` 加粗等原生快捷键
+- **导出**：复制 Markdown 源码 / 导出 .md 文件
+
+### 模式三：Markdown 转 Excel
+
+从 Markdown 文本中智能提取表格，导出为 Excel / CSV。
+
+- **自动忽略非表格文字**：只提取 `| ... |` 格式的表格行
+- **Pandas 引擎**：后端 pandas 处理，支持 .xlsx / .csv 双格式导出
 
 ---
 
-## 🛠️ 技术栈与特性修复
+## 全局功能
 
-*   **前端**：Vite + Vue 3 + `@mdit/plugin-katex`（解决远古 KaTeX 上下标错位问题） + Vditor
-*   **后端**：Python 3 + Pywebview + Pandas + Pypandoc (需系统预装 Pandoc 或在环境中集成)
-*   **系统级排版修复**：通过定制化 CSS 空间物理扭曲 (`transform: skewX`) 及字体后备策略，完美解决了 Windows Chromium 内核锁定中文字体斜体渲染的骨灰级 Bug。
+### 🌙 暗黑模式
+
+顶部一键切换 🌙/☀️，全界面联动换肤：导航栏、编辑区、预览区、AI 面板、卡片全部适配。主题选择持久化到 localStorage，重启自动恢复。
+
+### 💾 自动保存（防丢失）
+
+三个模式的内容均实时静默保存到 localStorage：
+- 模式一 / 模式三：`watch` 监听输入变化 → 自动写入
+- 模式二：Vditor 原生 `cache` 配置
+- 关闭应用后重新打开，所有内容自动恢复
+
+### 🤖 AI 助手（侧边悬浮面板）
+
+左下角 ✨ 按钮唤起，支持拖拽移动、右下角缩放。
+
+- **OpenAI 兼容接口**：支持自定义 Base URL / API Key / Model（兼容 OpenAI、DeepSeek、Moonshot 等）
+- **后端代理**：通过 Python `urllib` 转发请求，彻底规避浏览器 CORS 跨域限制
+- **对话持久化**：聊天历史和 API 配置均存 localStorage
+- **一键复制**：AI 回复气泡内嵌 📋 按钮，`navigator.clipboard` + `execCommand` 双路径兜底
+- **现代化 UI**：毛玻璃面板、头像气泡、药丸形输入框、SVG 纸飞机发送按钮
+
+### 🎨 SaaS 卡片布局
+
+仿在线工具的悬浮卡片设计：
+- 底层浅灰蓝 `#f4f6f8` 背景 + 30px 外留白
+- 白色圆角卡片 + 轻阴影 + hover 加深
+- 卡片头部承载标题和操作按钮，内容区与操作区分离
+- 虚线上传区模仿现代 SaaS 工具的文件导入交互
 
 ---
 
-## 📦 本地开发与运行指南
+## 技术栈
+
+| 层 | 技术 |
+|---|---|
+| 前端框架 | Vue 3 + Vite |
+| Markdown 渲染 | markdown-it + @mdit/plugin-katex |
+| 富文本编辑 | Vditor（WYSIWYG 模式） |
+| 桌面容器 | pywebview（Chromium 内核） |
+| 文档转换 | pypandoc → Pandoc（HTML/DOCX/PDF/PPTX） |
+| 表格处理 | pandas + openpyxl |
+| AI 代理 | Python urllib（标准库，零额外依赖） |
+| 打包 | PyInstaller（单文件 .exe） |
+
+---
+
+## 本地开发
 
 ### 1. 环境准备
-确保你的电脑已安装 `Node.js` 和 `Python 3.8+`。
+
+- Node.js 18+
+- Python 3.8+
+- [Pandoc](https://pandoc.org/installing.html)（PDF 导出需额外安装 [MiKTeX](https://miktex.org/) 提供 XeLaTeX 引擎）
 
 ### 2. 前端构建
-进入 frontend 目录，安装依赖并编译获取静态文件：
+
 ```bash
 cd frontend
 npm install
 npm run build
 ```
 
-### 3. 后端依赖安装
-进入 backend 目录，安装所需的 Python 处理库：
+构建产物输出到 `backend/dist/`（vite.config.js 中配置 `outDir: '../backend/dist'`）。
+
+### 3. 后端依赖
+
 ```bash
 cd backend
-pip install pywebview pandas openpyxl markdown lxml pypandoc pyinstaller
+pip install pywebview pandas openpyxl markdown lxml pypandoc
 ```
 
-### 4. 运行调试
-在 backend 目录下，直接运行 Python 入口文件：
+### 4. 启动应用
+
 ```bash
+cd backend
 python main.py
 ```
-*(注意：调试阶段可在 `main.py` 中将 `webview.start(debug=True)` 开启以调出浏览器开发者工具)*
+
+> 调试时可将 `main.py` 末尾的 `webview.start(debug=False)` 改为 `True` 以开启 DevTools。
 
 ---
 
-## 🚀 一键打包发布 (Windows .exe)
-
-使用 PyInstaller 将应用打包为无需依赖环境的单文件绿色版桌面软件。
-在 `backend` 目录下执行以下命令：
+## 打包发布（Windows .exe）
 
 ```bash
-pyinstaller --noconsole --onefile --name "MarkTrans" --add-data "../frontend/dist;dist" main.py
+cd backend
+pyinstaller --noconsole --onefile --name "MarkTrans" `
+  --add-data "dist;dist" `
+  --add-binary "C:\Program Files\Pandoc\pandoc.exe;." `
+  --distpath "../release" `
+  --exclude-module torch --exclude-module torchvision `
+  --exclude-module tensorflow --exclude-module matplotlib `
+  --exclude-module scipy --exclude-module pygame `
+  --exclude-module cv2 --exclude-module av `
+  --exclude-module OpenGL --exclude-module IPython `
+  main.py
 ```
-构建成功后，在 `backend/dist` 文件夹下即可找到 `MarkTrans.exe`。双击即可在任何 Windows 电脑上体验秒开的快乐！
 
+- `--add-binary`：将 Pandoc 可执行文件注入 exe（pypandoc 不自带 Pandoc 二进制）
+- `--exclude-module`：排除系统环境中不需要的大型包（torch/tensorflow 等），将体积从 ~3GB 压缩至 ~90MB
+- 产物路径：`release/MarkTrans.exe`
+
+---
+
+## 项目结构
+
+```
+MarkTrans/
+├── frontend/
+│   ├── src/
+│   │   ├── App.vue          # 主组件（三模式 + AI 助手 + 暗黑模式 + 卡片布局）
+│   │   ├── main.js          # Vue 入口
+│   │   └── style.css        # 全局样式
+│   ├── index.html
+│   ├── vite.config.js       # outDir → ../backend/dist
+│   └── package.json
+├── backend/
+│   ├── main.py              # pywebview 入口 + Api 类（导出/转换/AI 代理）
+│   ├── requirements.txt
+│   └── dist/                # 前端构建产物（gitignore）
+├── release/                 # PyInstaller 产物（gitignore）
+├── .gitignore
+└── README.md
+```
+
+---
+
+## PDF 导出依赖说明
+
+PDF 导出依赖 XeLaTeX 引擎渲染，以下参数已硬编码在 `backend/main.py` 中：
+
+```python
+pdf_args = [
+    '--pdf-engine=xelatex',
+    '-V', 'geometry:margin=1in',
+    '-V', 'CJKmainfont=Microsoft YaHei',
+    '--wrap=preserve'
+]
+```
+
+- **开发环境**：需安装 MiKTeX 或 TeX Live 提供 `xelatex` 命令
+- **打包 exe**：XeLaTeX 引擎体积过大（数 GB）无法打包进 exe，目标机器需自行安装
+
+---
+
+## License
+
+MIT

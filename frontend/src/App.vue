@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import MarkdownIt from 'markdown-it'
 import { katex } from '@mdit/plugin-katex'
 // 模式二：Vditor 富文本编辑器（所见即所得）
@@ -26,8 +26,8 @@ const activeTab = ref('md2doc')
 // Vditor 富文本编辑器实例（模式二）
 const vditor = ref(null)
 
-// 模式一：Markdown 源码内容（textarea 双向绑定）
-const markdownContent = ref('')
+// PPT 分页辅助线开关（仅模式一预览区，开启时显示红色断层线）
+const showPptGuides = ref(false)
 
 // 模式一的灰色示例占位符（支持多行排版与示例）
 const mdPlaceholder = `在此输入或粘贴 Markdown 源码...
@@ -40,14 +40,22 @@ const mdPlaceholder = `在此输入或粘贴 Markdown 源码...
 $$
 x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}
 $$
+
+💡 【一键生成 PPT 提示】
+# 这是一张标题幻灯片
+## 这是一张内容幻灯片
+* 汇报要点 1
+* 汇报要点 2
 `
+
+// 模式一：Markdown 源码内容（textarea 双向绑定）
+// 初始化时优先尝试从 localStorage 读取历史数据，若无则使用默认占位文本
+const markdownContent = ref(localStorage.getItem('marktrans_md_cache') || mdPlaceholder)
 
 // 实时计算预览 HTML（仅模式一使用）
 const previewHtml = computed(() => md.render(markdownContent.value))
 
 // ===== 模式三：Markdown 转 Excel =====
-const excelContent = ref('')
-
 // 模式三的灰色示例占位符（提示 + 表格示例）
 const excelPlaceholder = `在此输入或粘贴带有表格的 Markdown 文本...
 （提示：普通说明文字会被自动忽略，纯净剥离表格导出）
@@ -58,7 +66,171 @@ const excelPlaceholder = `在此输入或粘贴带有表格的 Markdown 文本..
 | Markdown 重构 | 子白 | 已完成 |
 | Pandas 接入 | zibai | 进行中 |
 `
+// 初始化时优先尝试从 localStorage 读取历史数据，若无则使用默认占位文本
+const excelContent = ref(localStorage.getItem('marktrans_excel_cache') || excelPlaceholder)
 const excelPreviewHtml = computed(() => md.render(excelContent.value))
+
+// ===== 防丢失：本地自动实时保存 (Auto Save) =====
+// 当用户在代码模式输入时，实时静默保存
+watch(markdownContent, (newVal) => {
+  localStorage.setItem('marktrans_md_cache', newVal)
+})
+// 当用户在 Excel 模式输入时，实时静默保存
+watch(excelContent, (newVal) => {
+  localStorage.setItem('marktrans_excel_cache', newVal)
+})
+
+// ===== 暗黑模式 (Dark Mode) =====
+// 初始化暗黑主题状态
+const isDarkMode = ref(localStorage.getItem('marktrans_theme') === 'dark')
+
+// 监听主题切换，改变 HTML 属性并保持本地存储，同时联动 Vditor
+watch(isDarkMode, (newVal) => {
+  const themeName = newVal ? 'dark' : 'light'
+  localStorage.setItem('marktrans_theme', themeName)
+  document.documentElement.setAttribute('data-theme', themeName)
+
+  // 联动富文本 Vditor 换肤
+  if (vditor.value) {
+    vditor.value.setTheme(themeName, themeName, newVal ? 'native' : 'github')
+  }
+}, { immediate: true })
+
+// ================= AI 助手相关状态 =================
+const isAiOpen = ref(false)
+const showAiSettings = ref(false)
+const aiConfig = ref({
+  apiKey: localStorage.getItem('marktrans_ai_key') || '',
+  baseUrl: localStorage.getItem('marktrans_ai_url') || 'https://api.openai.com/v1',
+  model: localStorage.getItem('marktrans_ai_model') || 'gpt-3.5-turbo'
+})
+const aiMessages = ref(JSON.parse(localStorage.getItem('marktrans_ai_msgs') || '[]'))
+const aiInput = ref('')
+const isAiLoading = ref(false)
+
+watch(aiConfig, (newVal) => {
+  localStorage.setItem('marktrans_ai_key', newVal.apiKey)
+  localStorage.setItem('marktrans_ai_url', newVal.baseUrl)
+  localStorage.setItem('marktrans_ai_model', newVal.model)
+}, { deep: true })
+watch(aiMessages, (newVal) => {
+  localStorage.setItem('marktrans_ai_msgs', JSON.stringify(newVal))
+}, { deep: true })
+
+const sendAiMessage = async () => {
+  if (!aiInput.value.trim() || isAiLoading.value) return
+  if (!aiConfig.value.apiKey) {
+    alert("请先点击 AI 面板右上角的⚙️设置 API Key")
+    showAiSettings.value = true
+    return
+  }
+  const userText = aiInput.value.trim()
+  aiMessages.value.push({ role: 'user', content: userText })
+  aiInput.value = ''
+  isAiLoading.value = true
+
+  try {
+    if (window.pywebview && window.pywebview.api) {
+      // 交给不具备跨域限制的 Python 后端去发请求
+      const res = await window.pywebview.api.chat_with_ai(
+        aiConfig.value.baseUrl,
+        aiConfig.value.apiKey,
+        aiConfig.value.model,
+        aiMessages.value
+      )
+
+      if (res.success) {
+        aiMessages.value.push({ role: 'assistant', content: res.reply })
+      } else {
+        throw new Error(res.error)
+      }
+    } else {
+      throw new Error("请在桌面客户端环境运行该功能！")
+    }
+  } catch (error) {
+    aiMessages.value.push({ role: 'assistant', content: `[接口返回错误] \n${error.message}` })
+  } finally {
+    isAiLoading.value = false
+  }
+}
+const clearAiMessages = () => { aiMessages.value = [] }
+
+// ================= AI 面板拖拽与样式状态 =================
+const aiPanelStyle = ref({
+  width: '320px',
+  height: '480px',
+  top: 'auto',
+  left: '30px',
+  bottom: '80px'
+})
+
+let isDragging = false
+let startX = 0, startY = 0, initialLeft = 0, initialTop = 0
+
+const startDrag = (e) => {
+  // 如果是点击了按钮等元素，不触发拖拽
+  if (e.target.tagName.toLowerCase() === 'button') return
+
+  isDragging = true
+  startX = e.clientX
+  startY = e.clientY
+
+  const panel = document.querySelector('.ai-panel')
+  const rect = panel.getBoundingClientRect()
+  initialLeft = rect.left
+  initialTop = rect.top
+
+  // 转换为绝对定位以便平滑拖拽
+  aiPanelStyle.value.top = `${initialTop}px`
+  aiPanelStyle.value.left = `${initialLeft}px`
+  aiPanelStyle.value.bottom = 'auto'
+
+  document.addEventListener('mousemove', onDrag)
+  document.addEventListener('mouseup', stopDrag)
+}
+
+const onDrag = (e) => {
+  if (!isDragging) return
+  const dx = e.clientX - startX
+  const dy = e.clientY - startY
+  aiPanelStyle.value.left = `${initialLeft + dx}px`
+  aiPanelStyle.value.top = `${initialTop + dy}px`
+}
+
+const stopDrag = () => {
+  isDragging = false
+  document.removeEventListener('mousemove', onDrag)
+  document.removeEventListener('mouseup', stopDrag)
+}
+
+// 显式保存配置方法
+const saveAiConfig = () => {
+  localStorage.setItem('marktrans_ai_key', aiConfig.value.apiKey)
+  localStorage.setItem('marktrans_ai_url', aiConfig.value.baseUrl)
+  localStorage.setItem('marktrans_ai_model', aiConfig.value.model)
+  alert('配置已持久化保存！')
+  showAiSettings.value = false
+}
+
+const copyAiMessage = async (text) => {
+  try {
+    if (navigator.clipboard) {
+      await navigator.clipboard.writeText(text)
+      alert('已复制到剪贴板！')
+    } else {
+      // 兼容古老环境的备用复制方案
+      const textArea = document.createElement("textarea")
+      textArea.value = text
+      document.body.appendChild(textArea)
+      textArea.select()
+      document.execCommand("copy")
+      document.body.removeChild(textArea)
+      alert('已复制到剪贴板！')
+    }
+  } catch (err) {
+    alert('复制失败，请手动选中复制')
+  }
+}
 
 /**
  * 获取当前需要导出的 Markdown 内容：
@@ -158,7 +330,11 @@ onMounted(() => {
     height: '100%',
     lang: 'zh_CN',
     toolbarConfig: { pin: true },
-    cache: { enable: false },
+    theme: isDarkMode.value ? 'dark' : 'classic',
+    cache: {
+      enable: true,
+      id: 'marktrans_vditor_cache'
+    },
     placeholder: '在此像使用 Word 一样排版...\n\n💡 提示：支持直接拖拽 / 粘贴图片自动上屏，支持 Ctrl+B 加粗，输入 $$ 可快速插入公式。',
     // 去除 fullscreen 全屏按钮（使用桌面窗口的最大化即可），保持其它按钮精简
     toolbar: [
@@ -242,7 +418,9 @@ onUnmounted(() => {
     <header class="global-navbar">
       <div class="logo-area">
         <span class="logo-text">MarkTrans</span>
-        <button class="btn-export" style="background-color: #607d8b; margin-left: 15px;" @click="openLocalFile" title="支持读取 .md 和解析 .docx 文件">导入文件 (MD/Word)</button>
+        <button class="theme-toggle-btn" @click="isDarkMode = !isDarkMode" :title="isDarkMode ? '切换至亮色模式' : '切换至夜间模式'">
+          {{ isDarkMode ? '☀️' : '🌙' }}
+        </button>
       </div>
 
       <nav class="nav-tabs">
@@ -269,54 +447,49 @@ onUnmounted(() => {
         </div>
       </nav>
 
-      <!-- 按 Tab 模式动态切换导出按钮（居中对齐） -->
-      <div class="header-actions">
-        <template v-if="activeTab === 'md2doc'">
-          <button class="btn-export web-btn" @click="exportFile('html')">
-            导出 HTML
-          </button>
-          <button class="btn-export word-btn" @click="exportFile('docx')">
-            导出 Docx
-          </button>
-          <button class="btn-export pdf-btn" @click="exportFile('pdf')">
-            导出 PDF
-          </button>
-        </template>
-        <template v-else-if="activeTab === 'md2excel'">
-          <button class="btn-export" style="background-color: #f39c12;" @click="exportFile('csv')">
-            导出 CSV
-          </button>
-          <button class="btn-export" style="background-color: #217346;" @click="exportFile('xlsx')">
-            导出 Excel
-          </button>
-        </template>
-        <template v-else>
-          <button class="btn-export web-btn" @click="copyMarkdown">
-            复制源码(Copy)
-          </button>
-          <button class="btn-export word-btn" @click="exportFile('md')">
-            导出 MD
-          </button>
-        </template>
+      <!-- 按 Tab 模式动态切换导出按钮（仅 rtf2md 模式保留在顶部栏） -->
+      <div class="header-actions" v-if="activeTab === 'rtf2md'">
+        <button class="btn-export web-btn" @click="copyMarkdown">
+          复制源码(Copy)
+        </button>
+        <button class="btn-export word-btn" @click="exportFile('md')">
+          导出 MD
+        </button>
       </div>
     </header>
 
     <!-- ================= 工作区 ================= -->
     <main class="main-workspace">
-      <!-- 模式一：Markdown 编辑与导出（纯粹的左右分栏，无工具栏） -->
+      <!-- 模式一：Markdown 编辑与导出（SaaS 卡片布局） -->
       <div class="mode-panel md-mode" v-show="activeTab === 'md2doc'">
-        <section class="editor-section">
-          <textarea
-            v-model="markdownContent"
-            class="md-textarea"
-            :placeholder="mdPlaceholder"
-            spellcheck="false"
-          ></textarea>
-        </section>
+        <div class="editor-section card-style">
+          <div class="card-header">
+            <span class="card-title">📄 编辑 Markdown 内容</span>
+            <label class="ppt-toggle" title="开启后可清晰查看 PPT 将在哪里分页">
+              <input type="checkbox" v-model="showPptGuides" /> PPT 辅助线
+            </label>
+          </div>
+          <!-- 仿在线工具的虚线文件区 -->
+          <div class="dashed-upload-area" @click="openLocalFile">
+            <div class="upload-icon">📤</div>
+            <div class="upload-text">点击选择本地 Markdown / TXT 文件</div>
+            <div class="upload-subtext">也支持直接在此处下方粘贴内容（本地处理，绝对隐私）</div>
+          </div>
+          <textarea v-model="markdownContent" class="md-textarea" :placeholder="mdPlaceholder" spellcheck="false"></textarea>
+        </div>
 
-        <section class="preview-section">
-          <div class="preview pro-typography" v-html="previewHtml"></div>
-        </section>
+        <div class="preview-section card-style">
+          <div class="card-header">
+            <span class="card-title">👁️ 实时预览</span>
+            <div class="card-actions">
+              <button class="btn-export html" @click="exportFile('html')">导出 HTML</button>
+              <button class="btn-export docx" @click="exportFile('docx')">导出 Docx</button>
+              <button class="btn-export pdf" @click="exportFile('pdf')">导出 PDF</button>
+              <button class="btn-export pptx" @click="exportFile('pptx')">导出 PPT</button>
+            </div>
+          </div>
+          <div class="preview p-content pro-typography" :class="{ 'ppt-guides-active': showPptGuides }" v-html="previewHtml"></div>
+        </div>
       </div>
 
       <!-- 模式二：Vditor 富文本编辑（所见即所得，自动转为 Markdown 后可导出） -->
@@ -324,22 +497,84 @@ onUnmounted(() => {
         <div id="vditor" style="height: 100%; width: 100%;"></div>
       </div>
 
-      <!-- === 模式 3：Markdown 转 Excel === -->
+      <!-- === 模式 3：Markdown 转 Excel (SaaS 卡片布局) === -->
       <div v-show="activeTab === 'md2excel'" class="mode-panel md-mode">
-        <div class="editor-section">
-          <textarea
-            v-model="excelContent"
-            class="md-textarea"
-            :placeholder="excelPlaceholder"
-            spellcheck="false"
-          ></textarea>
+        <div class="editor-section card-style">
+          <div class="card-header">
+            <span class="card-title">📊 输入 Markdown 表格</span>
+          </div>
+          <div class="dashed-upload-area" @click="openLocalFile">
+            <div class="upload-icon">📤</div>
+            <div class="upload-text">点击选择本地 Markdown / TXT 文件</div>
+            <div class="upload-subtext">普通文字会被自动忽略，仅提取表格导出</div>
+          </div>
+          <textarea v-model="excelContent" class="md-textarea" :placeholder="excelPlaceholder" spellcheck="false"></textarea>
         </div>
-        <div class="preview-section">
-          <!-- 加上 excel-preview-only 特殊类用于隐藏其它文本 -->
-          <div class="preview pro-typography excel-preview-only" v-html="excelPreviewHtml"></div>
+        <div class="preview-section card-style">
+          <div class="card-header">
+            <span class="card-title">👁️ 表格预览</span>
+            <div class="card-actions">
+              <button class="btn-export" style="background-color: #f39c12;" @click="exportFile('csv')">导出 CSV</button>
+              <button class="btn-export" style="background-color: #217346;" @click="exportFile('xlsx')">导出 Excel</button>
+            </div>
+          </div>
+          <div class="preview p-content pro-typography excel-preview-only" v-html="excelPreviewHtml"></div>
         </div>
       </div>
     </main>
+
+    <!-- 左下角触发按钮 -->
+    <div class="ai-trigger-btn" @click="isAiOpen = !isAiOpen" :title="isAiOpen ? '收起 AI' : '唤醒 AI'">✨</div>
+    <!-- 聊天面板 -->
+    <div v-show="isAiOpen" class="ai-panel" :style="aiPanelStyle">
+      <!-- 头部 -->
+      <div class="ai-header" @mousedown="startDrag">
+        <div class="header-title">🤖 AI 助手</div>
+        <div class="ai-header-actions">
+          <button @click="clearAiMessages" title="清空对话">🗑️</button>
+          <button @click="showAiSettings = !showAiSettings" title="设置 API">⚙️</button>
+          <button @click="isAiOpen = false">✖</button>
+        </div>
+      </div>
+
+      <!-- 设置浮层 -->
+      <div v-show="showAiSettings" class="ai-settings">
+        <div class="setting-item"><label>Base URL:</label><input v-model="aiConfig.baseUrl" placeholder="https://api.openai.com/v1" /></div>
+        <div class="setting-item"><label>API Key:</label><input v-model="aiConfig.apiKey" type="password" placeholder="sk-..." /></div>
+        <div class="setting-item"><label>Model:</label><input v-model="aiConfig.model" placeholder="gpt-4o / deepseek-chat" /></div>
+        <button @click="saveAiConfig" class="save-config-btn">✅ 确认并保存配置</button>
+      </div>
+
+      <!-- 消息列表 (增加头像展示) -->
+      <div class="ai-messages">
+        <div v-if="aiMessages.length === 0" class="ai-empty">
+          <div class="empty-icon">✨</div>
+          你好！我是你的文档助手。你可以在⚙️中配置接口，然后向我提问。
+        </div>
+        <div v-for="(msg, index) in aiMessages" :key="index" :class="['ai-msg', msg.role === 'user' ? 'ai-user' : 'ai-bot']">
+          <div v-if="msg.role === 'assistant'" class="ai-avatar">🤖</div>
+          <div class="msg-bubble">
+            <div class="msg-content">{{ msg.content }}</div>
+            <button v-if="msg.role === 'assistant'" class="ai-copy-btn" @click="copyAiMessage(msg.content)" title="复制回复">📋</button>
+          </div>
+          <div v-if="msg.role === 'user'" class="ai-avatar">🧑‍💻</div>
+        </div>
+        <div v-if="isAiLoading" class="ai-msg ai-bot">
+          <div class="ai-avatar">🤖</div>
+          <div class="msg-bubble"><div class="msg-content loading-dots">正在思考，请稍候...</div></div>
+        </div>
+      </div>
+
+      <!-- 现代风格药丸形输入区 -->
+      <div class="ai-input-area">
+        <div class="input-wrapper">
+          <textarea v-model="aiInput" @keydown.enter.prevent="sendAiMessage" placeholder="输入问题，Enter 发送..." rows="1"></textarea>
+          <button class="send-btn" :disabled="isAiLoading || !aiInput.trim()" @click="sendAiMessage">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path></svg>
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -382,18 +617,18 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 60px;
-  background-color: #ffffff;
-  border-bottom: 1px solid #e1e4e8;
-  padding: 0 20px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+  height: 70px;
+  background-color: #fff;
+  border-bottom: 1px solid #eaeaea;
+  padding: 0 40px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.02);
   flex-shrink: 0;
 }
 
 .logo-area {
-  width: 220px;
   display: flex;
   align-items: center;
+  gap: 20px;
 }
 
 .logo-text {
@@ -405,19 +640,17 @@ html, body {
 
 .nav-tabs {
   display: flex;
-  height: 100%;
+  gap: 30px;
 }
 
 .tab-item {
-  display: flex;
-  align-items: center;
-  padding: 0 24px;
-  font-size: 15px;
-  font-weight: 500;
-  color: #666;
   cursor: pointer;
-  position: relative;
-  transition: color 0.2s;
+  padding: 8px 10px;
+  color: #666;
+  font-weight: 500;
+  font-size: 16px;
+  border-bottom: 3px solid transparent;
+  transition: all 0.3s;
   user-select: none;
 }
 
@@ -442,21 +675,21 @@ html, body {
 
 .header-actions {
   display: flex;
-  gap: 10px;
-  width: 320px;
-  justify-content: center; /* 三个导出按钮居中，避免拥挤/挤到顶部 */
   align-items: center;
+  gap: 12px;
 }
 
 .btn-export {
-  padding: 6px 12px;
-  font-size: 13px;
+  padding: 8px 18px;
+  color: white;
   border: none;
-  border-radius: 4px;
   cursor: pointer;
-  font-weight: 500;
-  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: 8px;
   transition: opacity 0.2s, transform 0.1s;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  margin-left: 0;
   white-space: nowrap;
 }
 
@@ -478,6 +711,7 @@ html, body {
 
 .btn-export:hover {
   opacity: 0.9;
+  transform: translateY(-1px);
 }
 
 /* ================= 工作区布局 ================= */
@@ -498,7 +732,7 @@ html, body {
   flex: 1;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid #e1e4e8;
+  border-right: 1px solid #eaeaea;
   background-color: #fff;
   min-width: 0;
   min-height: 0;
@@ -506,6 +740,7 @@ html, body {
 
 .md-mode .preview-section {
   flex: 1;
+  padding: 40px 50px;
   overflow-y: auto;
   background-color: #fafbfc;
   min-width: 0;
@@ -516,15 +751,16 @@ html, body {
   flex: 1;
   width: 100%;
   height: 100%;
-  padding: 20px;
+  padding: 30px 40px;
   border: none;
   outline: none;
   resize: none;
-  font-family: 'SFMono-Regular', Consolas, Menlo, monospace;
-  font-size: 14.5px;
-  line-height: 1.7;
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 16px;
+  line-height: 1.8;
   color: #24292e;
   background-color: #fff;
+  box-sizing: border-box;
 }
 
 /* ================= 高级排版皮肤 (Typora 风格) ================= */
@@ -678,4 +914,298 @@ strong, b,
   /* 保证块级公式不被外层行高影响，并保持居中或专属格式 */
   line-height: 1.2 !important;
 }
+
+/* PPT 辅助线开关样式 */
+.ppt-toggle {
+  font-size: 13px;
+  color: #555;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: 15px;
+  cursor: pointer;
+  user-select: none;
+}
+.ppt-toggle input {
+  cursor: pointer;
+}
+
+/* =========================================
+   PPT 幻灯片分割线视觉模拟 (仅开启辅助线时生效)
+   ========================================= */
+/* 让分割线变成一条带有"新幻灯片"提示的华丽界线 */
+.pro-typography.ppt-guides-active hr {
+  height: 4px;
+  background-color: #d24726;
+  border: none;
+  margin: 40px 0;
+  position: relative;
+  overflow: visible;
+}
+.pro-typography.ppt-guides-active hr::after {
+  content: "✂️ 新一页幻灯片 (分割线切页)";
+  position: absolute;
+  top: -10px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: white;
+  padding: 0 10px;
+  color: #d24726;
+  font-size: 12px;
+  font-weight: bold;
+}
+
+/* 让二级标题自带顶级间距和边界，暗示由于 --slide-level=2，这里会自动切页 */
+.pro-typography.ppt-guides-active h2 {
+  margin-top: 50px;
+  padding-top: 20px;
+  border-top: 2px dashed #999;
+  position: relative;
+}
+.pro-typography.ppt-guides-active h2::before {
+  content: "📄 新一页幻灯片 (由标题切页)";
+  position: absolute;
+  top: -12px;
+  right: 0;
+  background: white;
+  padding: 0 5px;
+  color: #888;
+  font-size: 11px;
+}
+
+/* =========================================
+   🌙 全局暗黑模式 (Dark Mode)
+   ========================================= */
+/* 去除暗黑按钮的默认边框和背景 */
+.theme-toggle-btn {
+  background: transparent;
+  border: none;
+  font-size: 20px;
+  cursor: pointer;
+  margin-left: 15px;
+  transition: transform 0.2s;
+}
+.theme-toggle-btn:hover {
+  transform: scale(1.1);
+}
+
+/* 当 HTML 带有 data-theme="dark" 时，强制覆盖颜色 */
+html[data-theme="dark"] body {
+  background-color: #1a1a1a !important;
+  color: #d4d4d4 !important;
+}
+
+html[data-theme="dark"] header {
+  background-color: #252526 !important;
+  border-bottom: 1px solid #333 !important;
+}
+
+html[data-theme="dark"] .logo {
+  color: #e0e0e0 !important;
+}
+
+html[data-theme="dark"] .tab-item {
+  color: #a0a0a0;
+}
+html[data-theme="dark"] .tab-item.active {
+  color: #61dafb;
+  border-bottom-color: #61dafb;
+}
+
+html[data-theme="dark"] .editor-section {
+  border-right: 1px solid #333 !important;
+}
+
+html[data-theme="dark"] .md-textarea {
+  background-color: #1e1e1e !important;
+  color: #eeeeee !important;
+}
+
+html[data-theme="dark"] .preview-section {
+  background-color: transparent !important;
+}
+
+/* 覆盖 pro-typography Markdown 渲染区的普通颜色 */
+html[data-theme="dark"] .pro-typography {
+  color: #c9d1d9 !important;
+}
+html[data-theme="dark"] .pro-typography h1,
+html[data-theme="dark"] .pro-typography h2,
+html[data-theme="dark"] .pro-typography h3 {
+  color: #f0f6fc !important;
+}
+html[data-theme="dark"] .pro-typography pre,
+html[data-theme="dark"] .pro-typography code {
+  background-color: #2d333b !important;
+  color: #e8eaf1 !important;
+}
+html[data-theme="dark"] .pro-typography table th {
+  background-color: #21262d !important;
+  border-color: #30363d !important;
+}
+html[data-theme="dark"] .pro-typography table td,
+html[data-theme="dark"] .pro-typography table tr {
+  border-color: #30363d !important;
+  background-color: #0d1117 !important;
+}
+
+/* ================= 仪表盘卡片流布局 (SaaS Card Layout) ================= */
+/* 给页面底层铺上浅灰蓝底色 */
+main {
+  background-color: #f4f6f8;
+  padding: 30px;
+}
+.mode-panel {
+  gap: 30px;
+  background: transparent !important;
+}
+
+/* 独立悬浮卡片通用样式 */
+.card-style {
+  background-color: #ffffff;
+  border-radius: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
+  border: 1px solid #eef1f5;
+  display: flex !important;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: none !important;
+}
+.card-style:hover {
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+  transition: box-shadow 0.3s ease;
+}
+
+/* 卡片头部小横条 */
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 15px 25px;
+  background-color: #fdfdfd;
+  border-bottom: 1px solid #f0f0f0;
+}
+.card-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #333;
+}
+.card-actions {
+  display: flex;
+  gap: 10px;
+}
+
+/* 虚线本地提取框 (仿截图样式) */
+.dashed-upload-area {
+  margin: 20px 25px 0 25px;
+  border: 2px dashed #d9e2ec;
+  border-radius: 8px;
+  padding: 25px 15px;
+  text-align: center;
+  cursor: pointer;
+  background-color: #fafbfc;
+  transition: all 0.2s;
+}
+.dashed-upload-area:hover {
+  border-color: #0072ff;
+  background-color: #f0f7ff;
+}
+.upload-icon { font-size: 28px; margin-bottom: 8px; }
+.upload-text { font-size: 15px; font-weight: bold; color: #444; }
+.upload-subtext { font-size: 12px; color: #888; margin-top: 5px; }
+
+/* 调整之前文本区和预览区的内边距，适应新卡片 */
+.card-style .md-textarea {
+  padding: 25px;
+  background: #ffffff;
+}
+.card-style .preview {
+  padding: 25px 40px;
+  height: 100%;
+  overflow-y: auto;
+}
+
+/* 根据截图美化那些不同颜色的极客导出按钮 */
+.btn-export.html { background-color: #10a37f; }
+.btn-export.docx { background-color: #556ee6; }
+.btn-export.pdf { background-color: #d13030; }
+.btn-export.pptx { background-color: #e76f51; }
+.btn-export { padding: 6px 14px; font-size: 13px; border-radius: 6px; }
+
+/* 适配暗黑模式 */
+html[data-theme="dark"] main { background-color: #121212; }
+html[data-theme="dark"] .card-style { background-color: #1e1e1e; border-color: #2b2b2b; }
+html[data-theme="dark"] .card-header { background-color: #252526; border-color: #333; }
+html[data-theme="dark"] .card-title { color: #d4d4d4; }
+html[data-theme="dark"] .dashed-upload-area { border-color: #444; background-color: #252526; }
+html[data-theme="dark"] .upload-text { color: #ccc; }
+html[data-theme="dark"] .card-style .md-textarea { background: #1e1e1e; }
+
+/* ================= AI 面板现代化美化 ================= */
+.ai-trigger-btn {
+  position: fixed; left: 20px; bottom: 20px; width: 50px; height: 50px;
+  background: linear-gradient(135deg, #00c6ff, #0072ff);
+  color: white; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  font-size: 24px; box-shadow: 0 4px 15px rgba(0, 198, 255, 0.4); cursor: pointer; z-index: 1000; transition: all 0.3s;
+}
+.ai-trigger-btn:hover { transform: scale(1.1) translateY(-3px); box-shadow: 0 8px 25px rgba(0, 198, 255, 0.5); }
+
+.ai-panel {
+  position: fixed; background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(12px); border-radius: 16px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.1); border: 1px solid rgba(0,0,0,0.08);
+  display: flex; flex-direction: column; z-index: 999;
+  resize: both; overflow: hidden; min-width: 300px; min-height: 400px; max-width: 80vw; max-height: 90vh;
+}
+
+/* 巨无霸防滑缩放拉杆 */
+.ai-panel::-webkit-resizer {
+  background-color: transparent;
+  background-image: repeating-linear-gradient(135deg, transparent, transparent 3px, #aaa 3px, #aaa 5px);
+  background-size: 16px 16px; background-position: bottom right; background-repeat: no-repeat;
+}
+
+.ai-header {
+  height: 48px; background: rgba(245,247,250,0.8);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 16px; font-weight: bold; border-bottom: 1px solid rgba(0,0,0,0.05);
+  cursor: grab; user-select: none; color: #333;
+}
+.ai-header:active { cursor: grabbing; }
+.header-title { display: flex; align-items: center; gap: 6px; }
+.ai-header-actions button { background: none; border: none; cursor: pointer; margin-left: 10px; font-size: 15px; opacity: 0.6; }
+.ai-header-actions button:hover { opacity: 1; }
+
+.ai-settings { padding: 15px; background: #fff; border-bottom: 1px solid #eaeaea; font-size: 12px; }
+.setting-item input { border: 1px solid #d9d9d9; padding: 8px; border-radius: 6px; outline: none; margin-top: 5px; width: 100%; box-sizing: border-box; }
+.save-config-btn { width: 100%; padding: 10px; background: #10a37f; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; margin-top: 10px; }
+
+.ai-messages { flex: 1; padding: 20px 15px; overflow-y: auto; background: transparent; display: flex; flex-direction: column; gap: 20px; }
+.ai-empty { text-align: center; color: #888; margin-top: 40px; }
+.empty-icon { font-size: 32px; margin-bottom: 10px; }
+.ai-msg { display: flex; align-items: flex-start; gap: 10px; width: 100%; }
+.ai-user { flex-direction: row-reverse; }
+.ai-avatar { font-size: 24px; line-height: 1; }
+.msg-bubble { max-width: 75%; display: flex; flex-direction: column; }
+.ai-msg .msg-content { padding: 10px 14px; font-size: 14px; line-height: 1.6; white-space: pre-wrap; user-select: text !important; }
+.ai-user .msg-content { background: #0072ff; color: #fff; border-radius: 16px 4px 16px 16px; box-shadow: 0 4px 10px rgba(0,114,255,0.15); }
+.ai-bot .msg-content { background: #fff; color: #333; border: 1px solid #e5e5e5; border-radius: 4px 16px 16px 16px; }
+.ai-copy-btn { margin-top: 4px; background: #fff; border: 1px solid #eee; border-radius: 4px; padding: 4px 8px; cursor: pointer; align-self: flex-start; font-size: 12px; }
+
+.ai-input-area { padding: 15px; background: rgba(255,255,255,0.8); border-top: 1px solid rgba(0,0,0,0.05); }
+.input-wrapper { display: flex; align-items: center; background: #f4f5f7; border-radius: 20px; padding: 5px 15px; }
+.input-wrapper textarea { flex: 1; border: none; background: transparent; padding: 10px 0; resize: none; outline: none; font-size: 14px; }
+.send-btn { width: 32px; height: 32px; border-radius: 50%; border: none; background: #0072ff; color: #fff; display: flex; align-items: center; justify-content: center; cursor: pointer; margin-left: 8px; flex-shrink: 0; }
+.send-btn:disabled { background: #ccc; cursor: not-allowed; }
+
+/* 暗黑模式适配 */
+html[data-theme="dark"] .ai-panel { background: rgba(30,30,30,0.95); border-color: #444; }
+html[data-theme="dark"] .ai-header { background: rgba(40,40,40,0.9); border-color: #333; color: #eee; }
+html[data-theme="dark"] .ai-settings { background: #252526; border-color: #333; }
+html[data-theme="dark"] .setting-item input { background: #1e1e1e; color: #eee; border-color: #444; }
+html[data-theme="dark"] .ai-bot .msg-content { background: #2d2d30; color: #eee; border-color: #444; }
+html[data-theme="dark"] .ai-input-area { background: transparent; border-color: #333; }
+html[data-theme="dark"] .input-wrapper { background: #2d2d30; }
+html[data-theme="dark"] .input-wrapper textarea { color: #fff; }
+html[data-theme="dark"] .ai-copy-btn { background: #333; border-color: #444; color: #ccc; }
 </style>
