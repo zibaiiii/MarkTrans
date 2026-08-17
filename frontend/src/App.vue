@@ -453,6 +453,9 @@ onMounted(() => {
     mode: 'wysiwyg',
     height: '100%',
     lang: 'zh_CN',
+    // 关键优化：将 CDN 指向本地 public/vditor 目录（Vite 打包后位于 dist/vditor/），
+    // 避免 Vditor 初始化时从 jsdelivr CDN 加载 i18n/icons/lute 等资源导致桌面端超时卡顿
+    cdn: 'vditor',
     toolbarConfig: { pin: true },
     theme: isDarkMode.value ? 'dark' : 'classic',
     // 关闭 Vditor 自带 localStorage 缓存 —— 改由 Python 后端统一持久化，
