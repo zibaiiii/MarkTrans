@@ -49,7 +49,7 @@
 ### 🔍 查找与替换（专业版悬浮窗）
 
 顶部 🔍 按钮或 `Ctrl+F` / `Ctrl+H` 唤出专业查找替换面板，仿 WPS/Office 交互：
-
+<img width="1920" height="1020" alt="image" src="https://github.com/user-attachments/assets/1cb9f0ea-7796-4af5-a02f-7928ab4272ab" />
 - **Tab 切换**：查找(D) / 替换(P) 两种模式
 - **逐个定位**：上一处(B) / 下一处(F) 高亮选区，支持环绕查找
 - **替换当前**：逐个替换选中的匹配项，替换后自动跳到下一处
@@ -76,9 +76,7 @@
 ### 🤖 AI 助手（侧边悬浮面板）
 
 左下角 ✨ 按钮唤起，支持拖拽移动、右下角缩放。
-<img width="1920" height="1020" alt="image" src="https://github.com/user-attachments/assets/9c53fe7c-0581-4064-bdb1-ddb6953f25a5" />
-<img width="1920" height="1020" alt="image" src="https://github.com/user-attachments/assets/e365de67-5f37-4356-a47c-fe0c11031fc4" />
-
+<img width="1920" height="1020" alt="image" src="https://github.com/user-attachments/assets/fc5028f1-7595-4460-8944-ac41dcad571b" />
 
 - **上下文感知自动改写**：AI 自动读取当前正文，对翻译/重写/修改请求直接修改原文
 - **一键撤销**：修改后 AI 面板头部出现 🔙 撤销按钮，点击即可恢复修改前的内容
