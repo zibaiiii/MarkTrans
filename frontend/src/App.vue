@@ -50,7 +50,9 @@ $$
 
 // 模式一：Markdown 源码内容（textarea 双向绑定）
 // 初始化时优先尝试从 localStorage 读取历史数据，若无则使用默认占位文本
-const markdownContent = ref(localStorage.getItem('marktrans_md_cache') || mdPlaceholder)
+// 注意：用 !== null 严格判断，避免用户主动清空内容（空字符串）后被示例覆写
+const savedMd = localStorage.getItem('marktrans_md_cache')
+const markdownContent = ref(savedMd !== null ? savedMd : mdPlaceholder)
 
 // 实时计算预览 HTML（仅模式一使用）
 const previewHtml = computed(() => md.render(markdownContent.value))
@@ -67,17 +69,37 @@ const excelPlaceholder = `在此输入或粘贴带有表格的 Markdown 文本..
 | Pandas 接入 | zibai | 进行中 |
 `
 // 初始化时优先尝试从 localStorage 读取历史数据，若无则使用默认占位文本
-const excelContent = ref(localStorage.getItem('marktrans_excel_cache') || excelPlaceholder)
+// 注意：用 !== null 严格判断，避免用户主动清空内容（空字符串）后被示例覆写
+const savedExcel = localStorage.getItem('marktrans_excel_cache')
+const excelContent = ref(savedExcel !== null ? savedExcel : excelPlaceholder)
 const excelPreviewHtml = computed(() => md.render(excelContent.value))
 
 // ===== 防丢失：本地自动实时保存 (Auto Save) =====
+// 双写策略：localStorage（同步镜像）+ Python 后端 state.json（真正持久化）
+// pywebview 的 localStorage 在关闭程序后可能被清空，因此 Python 文件才是唯一可靠真源。
+const _saveTimers = {}
+function persistState(key, value) {
+  // 1) localStorage 同步写入 —— 运行时快速读取用
+  try { localStorage.setItem(key, value) } catch (_) { /* 配额超限忽略 */ }
+  // 2) Python 后端异步写入（防抖 300ms，避免逐字符写文件）
+  if (!window.pywebview || !window.pywebview.api) return
+  if (_saveTimers[key]) clearTimeout(_saveTimers[key])
+  _saveTimers[key] = setTimeout(async () => {
+    try {
+      await window.pywebview.api.save_state(key, value)
+    } catch (e) {
+      console.warn(`持久化失败 [${key}]:`, e)
+    }
+  }, 300)
+}
+
 // 当用户在代码模式输入时，实时静默保存
 watch(markdownContent, (newVal) => {
-  localStorage.setItem('marktrans_md_cache', newVal)
+  persistState('marktrans_md_cache', newVal)
 })
 // 当用户在 Excel 模式输入时，实时静默保存
 watch(excelContent, (newVal) => {
-  localStorage.setItem('marktrans_excel_cache', newVal)
+  persistState('marktrans_excel_cache', newVal)
 })
 
 // ===== 暗黑模式 (Dark Mode) =====
@@ -88,7 +110,7 @@ const isDarkMode = ref(localStorage.getItem('marktrans_theme') === 'dark')
 // 监听主题切换，改变 HTML 属性并保持本地存储，同时联动 Vditor
 watch(isDarkMode, (newVal) => {
   const themeName = newVal ? 'dark' : 'light'
-  localStorage.setItem('marktrans_theme', themeName)
+  persistState('marktrans_theme', themeName)
   document.documentElement.setAttribute('data-theme', themeName)
 
   // 联动富文本 Vditor 换肤
@@ -110,12 +132,12 @@ const aiInput = ref('')
 const isAiLoading = ref(false)
 
 watch(aiConfig, (newVal) => {
-  localStorage.setItem('marktrans_ai_key', newVal.apiKey)
-  localStorage.setItem('marktrans_ai_url', newVal.baseUrl)
-  localStorage.setItem('marktrans_ai_model', newVal.model)
+  persistState('marktrans_ai_key', newVal.apiKey)
+  persistState('marktrans_ai_url', newVal.baseUrl)
+  persistState('marktrans_ai_model', newVal.model)
 }, { deep: true })
 watch(aiMessages, (newVal) => {
-  localStorage.setItem('marktrans_ai_msgs', JSON.stringify(newVal))
+  persistState('marktrans_ai_msgs', JSON.stringify(newVal))
 }, { deep: true })
 
 const sendAiMessage = async () => {
@@ -206,9 +228,9 @@ const stopDrag = () => {
 
 // 显式保存配置方法
 const saveAiConfig = () => {
-  localStorage.setItem('marktrans_ai_key', aiConfig.value.apiKey)
-  localStorage.setItem('marktrans_ai_url', aiConfig.value.baseUrl)
-  localStorage.setItem('marktrans_ai_model', aiConfig.value.model)
+  persistState('marktrans_ai_key', aiConfig.value.apiKey)
+  persistState('marktrans_ai_url', aiConfig.value.baseUrl)
+  persistState('marktrans_ai_model', aiConfig.value.model)
   alert('配置已持久化保存！')
   showAiSettings.value = false
 }
@@ -322,9 +344,59 @@ const openLocalFile = async () => {
   }
 }
 
+// ===== 启动时从 Python 后端恢复状态 =====
+// pywebview 的 localStorage 在关闭后可能被清空，因此真正的历史数据
+// 存放在 ~/.marktrans_data/state.json 中，每次启动时从此处批量恢复。
+let _restoredState = null
+
+async function restoreFromBackend() {
+  if (!window.pywebview || !window.pywebview.api) return
+  try {
+    const state = await window.pywebview.api.load_all_state()
+    if (!state || typeof state !== 'object') return
+    _restoredState = state
+
+    // 恢复 Markdown 内容（后端有值时才覆盖占位符）
+    if (state['marktrans_md_cache'] != null) {
+      markdownContent.value = state['marktrans_md_cache']
+    }
+    // 恢复 Excel 内容
+    if (state['marktrans_excel_cache'] != null) {
+      excelContent.value = state['marktrans_excel_cache']
+    }
+    // 恢复主题
+    if (state['marktrans_theme']) {
+      isDarkMode.value = state['marktrans_theme'] === 'dark'
+    }
+    // 恢复 AI 配置
+    if (state['marktrans_ai_key']) aiConfig.value.apiKey = state['marktrans_ai_key']
+    if (state['marktrans_ai_url']) aiConfig.value.baseUrl = state['marktrans_ai_url']
+    if (state['marktrans_ai_model']) aiConfig.value.model = state['marktrans_ai_model']
+    // 恢复 AI 对话记录
+    if (state['marktrans_ai_msgs']) {
+      try { aiMessages.value = JSON.parse(state['marktrans_ai_msgs']) } catch (_) { /* 忽略 */ }
+    }
+    // 恢复 Vditor 富文本内容（若 Vditor 已初始化则立即写入）
+    if (state['marktrans_vditor_content'] && vditor.value) {
+      try { vditor.value.setValue(state['marktrans_vditor_content']) } catch (_) { /* 忽略 */ }
+    }
+  } catch (e) {
+    console.warn('从后端恢复状态失败:', e)
+  }
+}
+
 // ===== Vditor 生命周期 =====
 onMounted(() => {
   if (typeof document === 'undefined') return
+
+  // pywebviewready 事件：JS API 就绪后从 Python 后端恢复历史状态
+  // （若事件已错过则直接尝试恢复，load_all_state 内部有判空保护）
+  window.addEventListener('pywebviewready', restoreFromBackend)
+  // 兜底：若 pywebview 已就绪（事件已触发过），直接调用
+  if (window.pywebview && window.pywebview.api) {
+    restoreFromBackend()
+  }
+
   // 重新初始化 Vditor
   vditor.value = new Vditor('vditor', {
     mode: 'wysiwyg',
@@ -332,10 +404,9 @@ onMounted(() => {
     lang: 'zh_CN',
     toolbarConfig: { pin: true },
     theme: isDarkMode.value ? 'dark' : 'classic',
-    cache: {
-      enable: true,
-      id: 'marktrans_vditor_cache'
-    },
+    // 关闭 Vditor 自带 localStorage 缓存 —— 改由 Python 后端统一持久化，
+    // 避免 Vditor 写入的 localStorage 被关闭时清空导致内容丢失
+    cache: { enable: false },
     placeholder: '在此像使用 Word 一样排版...\n\n💡 提示：支持直接拖拽 / 粘贴图片自动上屏，支持 Ctrl+B 加粗，输入 $$ 可快速插入公式。',
     // 去除 fullscreen 全屏按钮（使用桌面窗口的最大化即可），保持其它按钮精简
     toolbar: [
@@ -364,6 +435,10 @@ onMounted(() => {
         })
         return null // 告诉 Vditor 我们自己处理了，不要报错
       },
+    },
+    // 内容变化时实时持久化到 Python 后端（防抖由 persistState 内部处理）
+    input(content) {
+      persistState('marktrans_vditor_content', content)
     },
     // 在编辑器挂载完成后，强行注入操作系统的原生 title 悬停提示
     after: () => {
@@ -396,11 +471,18 @@ onMounted(() => {
           btn.setAttribute('title', zhTips[key])
         }
       })
+
+      // 若后端状态已先行加载（pywebviewready 早于 after），此刻补写 Vditor 内容
+      if (_restoredState && _restoredState['marktrans_vditor_content']) {
+        try { vditor.value.setValue(_restoredState['marktrans_vditor_content']) } catch (_) { /* 忽略 */ }
+      }
     },
   })
 })
 
 onUnmounted(() => {
+  // 移除 pywebviewready 监听，避免重复绑定
+  window.removeEventListener('pywebviewready', restoreFromBackend)
   // 释放 Vditor 事件监听与 DOM 资源，避免切 Tab/关闭时内存泄漏
   if (vditor.value && typeof vditor.value.destroy === 'function') {
     try {

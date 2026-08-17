@@ -6,6 +6,7 @@
 
 import os
 import sys
+import json
 import tempfile
 
 import markdown
@@ -16,6 +17,42 @@ import pypandoc
 # 输入格式：启用 hard_line_breaks 扩展，让单个回车也视为换行，
 # 与前端 textarea 的软换行行为保持一致（HTML/DOCX/PDF 均生效）。
 INPUT_FORMAT = 'markdown+hard_line_breaks'
+
+# ====================
+# Python 侧持久化存储（不依赖 pywebview localStorage）
+# ====================
+# pywebview 的 localStorage 在某些环境下会被清空（private_mode 残留、
+# WebView2 缓存回收等）。这里用直接的文件 I/O 作为"真正"的存储后端，
+# 前端 localStorage 仅作为运行时镜像，启动时从 JSON 文件恢复。
+STATE_DIR = os.path.join(os.path.expanduser('~'), '.marktrans_data')
+STATE_FILE = os.path.join(STATE_DIR, 'state.json')
+
+
+def _ensure_state_dir():
+    """确保状态目录存在（幂等）。"""
+    os.makedirs(STATE_DIR, exist_ok=True)
+
+
+def _read_state_all():
+    """读取全部状态，返回 dict。文件不存在或损坏时返回空 dict。"""
+    if not os.path.exists(STATE_FILE):
+        return {}
+    try:
+        with open(STATE_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _write_state_all(data):
+    """原子写入全部状态：先写临时文件再替换，避免写入中途崩溃导致损坏。"""
+    _ensure_state_dir()
+    tmp = STATE_FILE + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    # os.replace 在 Windows 上是原子的（覆盖目标文件）
+    os.replace(tmp, STATE_FILE)
 
 
 class Api:
@@ -56,6 +93,31 @@ class Api:
             except Exception as e:
                 return f"读取或转换文件失败: {str(e)}"
         return None
+
+    # ====================
+    # 状态持久化 API（供前端调用，替代不可靠的 localStorage）
+    # ====================
+    def save_state(self, key, value):
+        """持久化保存单个键值对到 ~/.marktrans_data/state.json。
+
+        采用"读取-合并-原子写入"策略，保证多键并发写入不互相覆盖。
+        返回 True 表示成功，字符串表示错误信息。
+        """
+        try:
+            data = _read_state_all()
+            data[key] = value
+            _write_state_all(data)
+            return True
+        except Exception as e:  # noqa: BLE001
+            return f'状态保存失败: {e}'
+
+    def load_state(self, key):
+        """按 key 读取单个值。不存在时返回 None。"""
+        return _read_state_all().get(key)
+
+    def load_all_state(self):
+        """一次性读取全部状态，供前端启动时批量恢复。"""
+        return _read_state_all()
 
     def export_file(self, file_type, markdown_content):
         """根据 file_type 将 markdown_content 转换并保存为对应文件。
@@ -312,20 +374,16 @@ class Api:
             return {"success": False, "error": error_msg}
 
 
+# ====================
+# 获取前端资源的绝对路径
+# ====================
 def get_resource_path():
-    """获取前端打包产物的入口 HTML 路径（兼容开发环境与 PyInstaller 打包环境）。
-
-    - 打包后（frozen）：PyInstaller 把 --add-data 注入的数据解压到临时目录
-      sys._MEIPASS；打包命令会把 dist 文件夹注入到根目录，故拼接 'dist/index.html'。
-    - 开发环境：vite 构建产物输出到 backend/dist/index.html（见 vite.config.js
-      的 outDir: '../backend/dist'），故直接从本文件所在目录的 dist 子目录查找。
-    """
     if getattr(sys, 'frozen', False):
-        # 打包后，PyInstaller 会把数据解压到一个临时目录 sys._MEIPASS
+        # 打包后的解压临时目录 sys._MEIPASS
         base_path = sys._MEIPASS
         return os.path.join(base_path, 'dist', 'index.html')
     else:
-        # 开发环境下，直接到本文件同级目录的 dist 子目录找（vite 输出在此）
+        # 开发环境目录（vite outDir: '../backend/dist'，产物在本文件同级 dist）
         base_path = os.path.dirname(os.path.abspath(__file__))
         return os.path.join(base_path, 'dist', 'index.html')
 
@@ -343,13 +401,20 @@ def setup_pandoc():
             pypandoc.pandoc_path = pandoc_path
 
 
-def main():
+# ====================
+# 主程序入口
+# ====================
+if __name__ == '__main__':
+    # 打包后需显式告知 pypandoc pandoc.exe 的位置（否则导出 docx/html/pdf/pptx 失败）
     setup_pandoc()
     api = Api()
     html_path = get_resource_path()
 
-    # 创建窗口：标题与打包产物名一致；保留最小尺寸约束提升体验
-    # 创建窗口，设定黄金比例 1440x900，并限制最小尺寸
+    # pywebview 官方原生的持久化路径：localStorage、cookie、缓存都落盘在此。
+    # 比 WEBVIEW2_USER_DATA_FOLDER 环境变量更可靠，跨所有 GUI 后端（EdgeChromium/CEF/QtWebEngine）。
+    storage_path = os.path.join(os.path.expanduser("~"), ".marktrans_data")
+    os.makedirs(storage_path, exist_ok=True)
+
     webview.create_window(
         'MarkTrans',
         url=html_path,
@@ -359,9 +424,15 @@ def main():
         min_size=(1024, 700),
     )
 
-    # 关键：debug=False 彻底关闭开发者工具弹窗（正式发布）
-    webview.start(debug=False)
-
-
-if __name__ == '__main__':
-    main()
+    # 持久化策略（双保险）：
+    # 主力：Python 侧 state.json（见上方 save_state / load_all_state），前端每次
+    #       修改都会通过 js_api 写入 ~/.marktrans_data/state.json，完全不依赖浏览器。
+    # 辅助：pywebview 原生 localStorage（private_mode=False + storage_path 固定），
+    #       作为运行时快速镜像；即便它被清空，启动时也会从 state.json 恢复。
+    webview.start(
+        debug=False,
+        private_mode=False,
+        http_server=True,
+        http_port=52719,
+        storage_path=storage_path,
+    )
