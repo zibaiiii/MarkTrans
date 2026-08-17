@@ -156,19 +156,44 @@ const sendAiMessage = async () => {
 
   try {
     if (window.pywebview && window.pywebview.api) {
-      // 1. 获取当前正在编辑的文本上下文
-      let currentText = ''
-      if (activeTab.value === 'md2doc') currentText = markdownContent.value
-      else if (activeTab.value === 'rtf2md' && vditor.value) currentText = vditor.value.getValue()
-      else if (activeTab.value === 'md2excel') currentText = excelContent.value
+      // ============= 冻结发送瞬间的上下文（防止异步等待时用户切 Tab 导致写错位）=============
+      const targetTab = activeTab.value
+      const currentVditor = vditor.value // 记录当时 Vditor 实例（rtf2md 切走后原实例仍在内存）
 
-      // 2. 构造强制性系统约束 Prompt
+      // 1. 获取当前激活标签页的内容
+      let currentText = ''
+      if (targetTab === 'md2doc') currentText = markdownContent.value || ''
+      else if (targetTab === 'rtf2md' && currentVditor) currentText = currentVditor.getValue() || ''
+      else if (targetTab === 'md2excel') currentText = excelContent.value || ''
+
+      // 2. 构造包含关键词显式触发规则的 System Prompt
       const systemPrompt = {
         role: 'system',
-        content: `你是一个智能Copilot文档助手。当前用户正在工作的文本内容是：\n\n---\n${currentText}\n---\n如果用户要求你对文章进行翻译、重写或修改，请你**必须**将修改后完整的最新全文严格包裹在<<<<UPDATE_START>>>>和<<<<UPDATE_END>>>>这两个标记符之间。除了修改后的全文外，不要在标记内写任何废话。如果只是普通问答，则不要使用此标记。`
+        content: `你是一个智能 Markdown 编辑器 Copilot。当前编辑区的最新全文如下：
+---
+${currentText || '(当前编辑区为空)'}
+---
+
+【核心指令触发规则】：
+当用户的输入包含以下【操作关键词/意图】之一时，你必须进入【正文编辑模式】，将最终的完整 Markdown 全文严格包裹在 <<<<UPDATE_START>>>> 和 <<<<UPDATE_END>>>> 之间：
+
+1. 【清空/重置】：如 "清空"、"清除"、"重置编辑区"、"删掉全文"、"新建"
+   -> 动作：依次独占一行输出 <<<<UPDATE_START>>>> 和 <<<<UPDATE_END>>>>，两个标记之间不要留任何字符（连换行也不要）。
+2. 【生成/新建】：如 "生成"、"写一篇"、"创建"、"帮我写"、"输出一个"、"制作表格"
+   -> 动作：标记内输出新生成的完整 Markdown 内容。
+3. 【修改/润色】：如 "修改"、"润色"、"重写"、"优化"、"改写"、"更正"、"排版"
+   -> 动作：结合当前编辑区内容，在标记内输出修改后的完整全文。
+4. 【追加/续写】：如 "续写"、"在后面加上"、"追加"、"补充"、"插入"
+   -> 动作：保留原有内容并在合适位置追加，在标记内输出合并后的完整全文。
+5. 【翻译/转换】：如 "翻译成英文/中文"、"转为表格"、"提取摘要"
+   -> 动作：在标记内输出翻译/转换后的完整 Markdown 内容。
+
+【输出格式红线】：
+- 只要命中上述操作，所有需要写入编辑区的内容必须且只能放在 <<<<UPDATE_START>>>> 与 <<<<UPDATE_END>>>> 之间。
+- 标记内部只放 Markdown 纯文本源码，严禁在外层包裹多余的 \`\`\`markdown 代码块。
+- 只有纯闲聊或单纯咨询问题（未命中上述操作词）时，才严禁输出 UPDATE 标记。`
       }
 
-      // 3. 将 system 注入到请求的最前面，不显示在前端给用户看
       const requestMessages = [systemPrompt, ...aiMessages.value]
 
       const res = await window.pywebview.api.chat_with_ai(
@@ -180,27 +205,98 @@ const sendAiMessage = async () => {
 
       if (res.success) {
         let finalReply = res.reply
+        let newContent = null
+        let isUpdated = false
 
-        // 4. 正则拦截与自动修改魔法
-        const updateRegex = /<<<<UPDATE_START>>>>([\s\S]*?)<<<<UPDATE_END>>>>/
+        // 3. 智能多级提取策略（防止 AI 不按常理出牌导致解析失败）
+
+        // 策略 A：精准匹配 <<<<UPDATE_START>>>> 内容 <<<<UPDATE_END>>>>
+        const updateRegex = /<{3,4}\s*UPDATE_START\s*>{3,4}([\s\S]*?)<{3,4}\s*UPDATE_END\s*>{3,4}/i
         const match = finalReply.match(updateRegex)
 
         if (match) {
-          const newContent = match[1].trim()
-
-          // 保存撤销快照 (后悔药)
-          aiUndoSnapshot.value = { tab: activeTab.value, content: currentText }
-
-          // 强行覆盖当前模式的输入框！
-          if (activeTab.value === 'md2doc') markdownContent.value = newContent
-          else if (activeTab.value === 'rtf2md' && vditor.value) vditor.value.setValue(newContent)
-          else if (activeTab.value === 'md2excel') excelContent.value = newContent
-
-          // 将 AI 回复里的长篇巨论替换为一句简短的提示
-          finalReply = finalReply.replace(updateRegex, '\n\n*(✨ 已自动将修改后的最新内容同步至当前正文)*\n\n')
+          newContent = match[1].trim()
+          // 容错：AI 可能把 \n 当作字面字符输出（反斜杠+n），而非实际换行，
+          // 导致"清空"操作提取到字面 "\n" 而非空字符串，编辑区残留 \n 文本。
+          if (newContent === '\\n' || newContent === '\\r' || newContent === '\\r\\n' || newContent === '\\t' || /^\\[nrt]+$/.test(newContent)) {
+            newContent = ''
+          }
+          isUpdated = true
+          finalReply = finalReply.replace(updateRegex, '').trim()
+        }
+        // 策略 B（容错）：AI 遗漏了标记，但输出了 ```markdown ... ``` 或 ``` ... ``` 代码块
+        else {
+          const codeBlockRegex = /```(?:markdown|md)?\s*\n([\s\S]*?)\n```/i
+          const codeMatch = finalReply.match(codeBlockRegex)
+          if (codeMatch) {
+            newContent = codeMatch[1].trim()
+            isUpdated = true
+            finalReply = finalReply.replace(codeBlockRegex, '').trim()
+          }
+          // 策略 C（清空指令兜底）：用户明确要求清空/删除，但 AI 仅文字回复已清空
+          else if (/清空|清除|删除|删掉|重置/i.test(userText) && /已清空|已为您清空|清除完成|已删除|已清|清空了|清除了|已完成|已重置/i.test(finalReply)) {
+            newContent = ''
+            isUpdated = true
+          }
         }
 
-        aiMessages.value.push({ role: 'assistant', content: finalReply })
+        // 4. 执行编辑器内容写入（写入到发送时锁定的 Tab，避免中途切 Tab 写错位）
+        if (isUpdated && newContent !== null) {
+          // 剥除可能误带的首尾 markdown 标记
+          newContent = newContent.replace(/^```(?:markdown|md)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim()
+
+          // ---- 最低内容检查（防 AI 胡扯的空壳回复污染编辑区）----
+          const userAsksGenerate = /生成|写一篇|创建|帮我写|输出|制作表格|填写|填充|构造|构建|设计|润色|优化|改写|翻译|追加|续写|补充|插入|修改|更正|排版|翻译|转换/i.test(userText)
+          const MIN_USEFUL_LEN = userAsksGenerate ? 15 : 0  // 生成类指令要求至少 15 字符
+          const contentIsSuspiciouslyShort = newContent.length > 0 && newContent.length < MIN_USEFUL_LEN
+
+          if (contentIsSuspiciouslyShort) {
+            // AI 可能被假历史污染，返回了空壳回复。跳过写入并在聊天中展示原始回复
+            console.warn('[AI] 跳过写入：提取的内容太短', newContent.length, '字符', newContent.slice(0, 80))
+            console.warn('[AI] 原始回复:', res.reply)
+            isUpdated = false
+            finalReply = `⚠️ AI 提取到的内容过短（${newContent.length} 字符），已跳过写入。\n\n**AI 原始回复：**\n${res.reply}`
+          } else {
+            // 正常写入
+            console.log('[AI] 写入编辑区：', newContent.length, '字符', 'targetTab=', targetTab)
+            console.log('[AI] 提取内容预览:', newContent.slice(0, 200))
+            console.log('[AI] 原始回复:', res.reply.slice(0, 300))
+
+            // 保存撤销快照（使用发送时原内容）
+            aiUndoSnapshot.value = { tab: targetTab, content: currentText }
+
+            // 注入到对应视图（按 targetTab 写入，而不是此刻的 activeTab —— 用户可能切了 Tab）
+            let wroteChars = 0
+            if (targetTab === 'md2doc') {
+              markdownContent.value = newContent
+              wroteChars = newContent.length
+            } else if (targetTab === 'rtf2md' && currentVditor) {
+              currentVditor.setValue(newContent)
+              wroteChars = newContent.length
+            } else if (targetTab === 'md2excel') {
+              excelContent.value = newContent
+              wroteChars = newContent.length
+            }
+
+            // 写入后自动切回发送时所在 Tab，让用户立刻看到修改效果
+            if (wroteChars >= 0 && activeTab.value !== targetTab) {
+              activeTab.value = targetTab
+            }
+
+            // 聊天框界面提示（加入写入长度信息，便于用户判断"真写入了"）
+            const labelMap = { md2doc: 'Markdown 编辑区', rtf2md: '富文本编辑区', md2excel: 'Markdown 表格区' }
+            const syncTip = `*(✨ 已同步 ${wroteChars} 字符到【${labelMap[targetTab] || '当前编辑区'}】)*`
+            finalReply = finalReply ? `${syncTip}\n\n${finalReply}` : syncTip
+          }
+        }
+
+        // 关键修复：存储【原始 AI 回复】而不是修改后的 finalReply
+        // 之前存 finalReply 会把"✨ 已同步..."这种无用提示写进对话历史，
+        // 导致下一轮 AI 看到假历史而返回空壳回复（第二次起就全失效）。
+        // 这里根据 isUpdated 决定存什么：
+        //   - 成功写入 → 存原始 res.reply（含 UPDATE 标记，AI 下次能看懂历史）
+        //   - 未写入 → 存 finalReply（可能是错误提示或说明文字）
+        aiMessages.value.push({ role: 'assistant', content: isUpdated ? res.reply : finalReply })
       } else {
         throw new Error(res.error)
       }
@@ -214,6 +310,12 @@ const sendAiMessage = async () => {
   }
 }
 const clearAiMessages = () => { aiMessages.value = [] }
+
+// ================= AI 快捷指令气泡 =================
+const quickSend = (text) => {
+  aiInput.value = text
+  sendAiMessage()
+}
 
 // ================= AI 自动改写撤销快照 =================
 const aiUndoSnapshot = ref(null)
@@ -231,8 +333,8 @@ const undoAiEdit = () => {
 
 // ================= AI 面板拖拽与样式状态 =================
 const aiPanelStyle = ref({
-  width: '320px',
-  height: '480px',
+  width: '380px',
+  height: '560px',
   top: 'auto',
   left: '30px',
   bottom: '80px'
@@ -867,6 +969,15 @@ const performReplaceAll = () => {
 
       <!-- 现代风格药丸形输入区 -->
       <div class="ai-input-area">
+        <!-- 快捷操作气泡条（放在 AI 聊天输入框上方） -->
+        <div class="ai-quick-actions">
+          <button class="quick-chip chip-clear" :disabled="isAiLoading" @click="quickSend('清空文本编辑区')" title="一键清空当前编辑区">🧹 清空</button>
+          <button class="quick-chip chip-gen"   :disabled="isAiLoading" @click="quickSend('生成一个 Markdown 格式的标准数据表格')" title="生成表格/文档">📄 生成</button>
+          <button class="quick-chip chip-polish" :disabled="isAiLoading" @click="quickSend('润色并优化当前文本排版，修正错别字')" title="润色排版/纠错">✨ 润色</button>
+          <button class="quick-chip chip-trans"  :disabled="isAiLoading" @click="quickSend('将当前编辑区的正文全部翻译为英文')" title="全文翻译为英文">🌐 翻译</button>
+          <button class="quick-chip chip-table"  :disabled="isAiLoading" @click="quickSend('生成一个标准 Markdown 数据表格并填充示例')" title="填充/生成表格">📊 表格</button>
+          <button class="quick-chip chip-append" :disabled="isAiLoading" @click="quickSend('在正文末尾追加一个总结章节')" title="追加总结段落">➕ 续写</button>
+        </div>
         <div class="input-wrapper">
           <textarea v-model="aiInput" @keydown.enter.prevent="sendAiMessage" placeholder="输入问题，Enter 发送..." rows="1"></textarea>
           <button class="send-btn" :disabled="isAiLoading || !aiInput.trim()" @click="sendAiMessage">
@@ -912,10 +1023,62 @@ const performReplaceAll = () => {
           </ul>
 
           <h3>🤖 AI 助手（左下角魔法棒）</h3>
+          <h4 style="margin:8px 0 4px 0;color:var(--primary-color);">✦ 如何让 AI 直接修改编辑区？</h4>
+          <p style="margin:0 0 10px 0;line-height:1.6;">AI 默认读取<strong>「当前激活标签页」</strong>的全文当上下文。只要你的指令命中以下五类<strong>操作关键词</strong>（清空 / 生成 / 修改润色 / 续写追加 / 翻译转换），AI 就会把结果自动写回编辑区。纯咨询问答不会改动正文。</p>
+
+          <table style="width:100%;border-collapse:collapse;font-size:13px;margin:8px 0 12px 0;border:1px solid var(--border-color, #e5e7eb);background:var(--card-bg, #fff);border-radius:8px;overflow:hidden;">
+            <thead>
+              <tr style="background:var(--primary-color,#0072ff);color:#fff;">
+                <th style="padding:10px 8px;text-align:left;font-weight:600;border-right:1px solid rgba(255,255,255,0.2);">操作类型</th>
+                <th style="padding:10px 8px;text-align:left;font-weight:600;border-right:1px solid rgba(255,255,255,0.2);">推荐输入话术示例</th>
+                <th style="padding:10px 8px;text-align:left;font-weight:600;">触发的编辑区动作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr style="border-bottom:1px solid var(--border-color,#eee);">
+                <td style="padding:9px 8px;font-weight:600;color:#ef4444;vertical-align:top;">🧹 清空编辑区</td>
+                <td style="padding:9px 8px;line-height:1.6;border-left:1px dashed var(--border-color,#eee);border-right:1px dashed var(--border-color,#eee);">
+                  • 清空文本编辑区<br>• 删除当前所有内容
+                </td>
+                <td style="padding:9px 8px;line-height:1.6;">编辑区直接重置为空白</td>
+              </tr>
+              <tr style="border-bottom:1px solid var(--border-color,#eee);">
+                <td style="padding:9px 8px;font-weight:600;color:#2563eb;vertical-align:top;">📄 全篇生成</td>
+                <td style="padding:9px 8px;line-height:1.6;border-left:1px dashed var(--border-color,#eee);border-right:1px dashed var(--border-color,#eee);">
+                  • 生成一个关于财务预算的 Markdown 表格<br>• 写一篇关于深度学习的综述，附带公式
+                </td>
+                <td style="padding:9px 8px;line-height:1.6;">生成全新内容并覆盖到编辑区</td>
+              </tr>
+              <tr style="border-bottom:1px solid var(--border-color,#eee);">
+                <td style="padding:9px 8px;font-weight:600;color:#f59e0b;vertical-align:top;">✨ 润色与优化</td>
+                <td style="padding:9px 8px;line-height:1.6;border-left:1px dashed var(--border-color,#eee);border-right:1px dashed var(--border-color,#eee);">
+                  • 优化当前编辑区的排版格式<br>• 润色正文，纠正错别字并强化语气
+                </td>
+                <td style="padding:9px 8px;line-height:1.6;">针对当前编辑区内容优化后覆盖</td>
+              </tr>
+              <tr style="border-bottom:1px solid var(--border-color,#eee);">
+                <td style="padding:9px 8px;font-weight:600;color:#10b981;vertical-align:top;">➕ 局部修改/续写</td>
+                <td style="padding:9px 8px;line-height:1.6;border-left:1px dashed var(--border-color,#eee);border-right:1px dashed var(--border-color,#eee);">
+                  • 在正文末尾追加一个总结章节<br>• 把文章中的第三个表格改为 4 列
+                </td>
+                <td style="padding:9px 8px;line-height:1.6;">保留原内容并追加/调整指定部分</td>
+              </tr>
+              <tr>
+                <td style="padding:9px 8px;font-weight:600;color:#8b5cf6;vertical-align:top;">🌐 翻译与转换</td>
+                <td style="padding:9px 8px;line-height:1.6;border-left:1px dashed var(--border-color,#eee);border-right:1px dashed var(--border-color,#eee);">
+                  • 将当前编辑区的正文全部翻译为英文<br>• 将当前内容转换成符合规范的 Markdown 表格
+                </td>
+                <td style="padding:9px 8px;line-height:1.6;">转换文本形态后更新到编辑区</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h4 style="margin:12px 0 4px 0;color:var(--primary-color);">✦ 常用小技巧</h4>
           <ul>
-            <li><strong>上下文感知：</strong> AI 会自动读取当前正文，对翻译/重写请求直接修改原文。</li>
-            <li><strong>一键撤销：</strong> 点击 🔙 撤销按钮可恢复 AI 修改前的内容。</li>
-            <li><strong>设置：</strong> ⚙️ 中配置 OpenAI 标准接口（API Key / Base URL / 模型名）。</li>
+            <li><strong>一键触发（免手动打字）：</strong> AI 聊天框输入框上方有一排<strong>「快捷指令气泡」</strong>，点一下直接发送对应动作。</li>
+            <li><strong>切换到正确的模式再提问：</strong> 改表格切「Markdown 转 Excel」；富文本排版切「文字转 Markdown」，AI 自动拿当前模式内容当上下文。</li>
+            <li><strong>一键撤销：</strong> AI 改得不满意，点面板右上角 <strong>🔙 撤销修改</strong>，瞬时恢复到改写前的状态（后悔药）。</li>
+            <li><strong>API 设置：</strong> ⚙️ 按钮中配置 OpenAI 标准接口（API Key / Base URL / 模型名），通义千问、DeepSeek、文心一言等兼容接口均可使用。</li>
           </ul>
 
           <h3>💾 数据持久化与主题</h3>
@@ -1595,11 +1758,42 @@ html[data-theme="dark"] .card-style .md-textarea { background: #1e1e1e; }
 .ai-bot .msg-content { background: #fff; color: #333; border: 1px solid #e5e5e5; border-radius: 4px 16px 16px 16px; }
 .ai-copy-btn { margin-top: 4px; background: #fff; border: 1px solid #eee; border-radius: 4px; padding: 4px 8px; cursor: pointer; align-self: flex-start; font-size: 12px; }
 
-.ai-input-area { padding: 15px; background: rgba(255,255,255,0.8); border-top: 1px solid rgba(0,0,0,0.05); }
+.ai-input-area { padding: 12px 15px 15px 15px; background: rgba(255,255,255,0.8); border-top: 1px solid rgba(0,0,0,0.05); }
 .input-wrapper { display: flex; align-items: center; background: #f4f5f7; border-radius: 20px; padding: 5px 15px; }
 .input-wrapper textarea { flex: 1; border: none; background: transparent; padding: 10px 0; resize: none; outline: none; font-size: 14px; }
 .send-btn { width: 32px; height: 32px; border-radius: 50%; border: none; background: #0072ff; color: #fff; display: flex; align-items: center; justify-content: center; cursor: pointer; margin-left: 8px; flex-shrink: 0; }
 .send-btn:disabled { background: #ccc; cursor: not-allowed; }
+
+/* -------- AI 快捷指令气泡条（胶囊式渐变药丸） -------- */
+.ai-quick-actions {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  padding: 0 0 12px 0; margin-bottom: 4px;
+  border-bottom: 1px dashed rgba(0,0,0,0.06);
+}
+.quick-chip {
+  appearance: none; border: none; cursor: pointer;
+  padding: 7px 13px; border-radius: 999px;
+  font-size: 12.5px; font-weight: 500; line-height: 1;
+  color: #fff; transition: all 0.2s ease;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+  display: inline-flex; align-items: center; gap: 4px;
+  white-space: nowrap;
+}
+.quick-chip:hover {
+  transform: translateY(-1.5px) scale(1.03);
+  box-shadow: 0 6px 15px rgba(0,0,0,0.15);
+  filter: brightness(1.07);
+}
+.quick-chip:active { transform: translateY(0) scale(0.97); }
+.quick-chip:disabled { filter: grayscale(0.7) opacity(0.6); cursor: not-allowed; transform: none; box-shadow: none; }
+
+/* 6 种渐变主题色，对应教程指南 5 类 + 追加操作 */
+.chip-clear  { background: linear-gradient(135deg, #ff6b6b 0%, #ef4444 100%); }
+.chip-gen    { background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); }
+.chip-polish { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); }
+.chip-trans  { background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); }
+.chip-table  { background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%); }
+.chip-append { background: linear-gradient(135deg, #10b981 0%, #059669 100%); }
 
 /* 暗黑模式适配 */
 html[data-theme="dark"] .ai-panel { background: rgba(30,30,30,0.95); border-color: #444; }
@@ -1611,6 +1805,9 @@ html[data-theme="dark"] .ai-input-area { background: transparent; border-color: 
 html[data-theme="dark"] .input-wrapper { background: #2d2d30; }
 html[data-theme="dark"] .input-wrapper textarea { color: #fff; }
 html[data-theme="dark"] .ai-copy-btn { background: #333; border-color: #444; color: #ccc; }
+html[data-theme="dark"] .ai-quick-actions { border-bottom-color: rgba(255,255,255,0.08); }
+html[data-theme="dark"] .quick-chip { box-shadow: 0 2px 8px rgba(0,0,0,0.4); color: #f5f5f5; }
+html[data-theme="dark"] .quick-chip:hover { box-shadow: 0 6px 18px rgba(0,0,0,0.55); }
 
 /* ================= Logo 交互与教程弹窗 ================= */
 .logo-text {
