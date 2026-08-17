@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import tempfile
+import shutil
 
 import markdown
 import pandas as pd
@@ -41,7 +42,11 @@ def _read_state_all():
         with open(STATE_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError, ValueError):
+        # UnicodeDecodeError: 文件编码损坏（非 UTF-8 字节）
+        # json.JSONDecodeError: JSON 语法错误
+        # OSError: 文件读写权限问题
+        # 以上情况均视为文件损坏，返回空 dict 让应用正常启动
         return {}
 
 
@@ -359,7 +364,7 @@ class Api:
         req.add_header('Authorization', f'Bearer {api_key}')
 
         try:
-            with urllib.request.urlopen(req, timeout=60) as response:
+            with urllib.request.urlopen(req, timeout=300) as response:
                 result = json.loads(response.read().decode('utf-8'))
                 return {"success": True, "reply": result['choices'][0]['message']['content']}
         except Exception as e:
@@ -414,6 +419,16 @@ if __name__ == '__main__':
     # 比 WEBVIEW2_USER_DATA_FOLDER 环境变量更可靠，跨所有 GUI 后端（EdgeChromium/CEF/QtWebEngine）。
     storage_path = os.path.join(os.path.expanduser("~"), ".marktrans_data")
     os.makedirs(storage_path, exist_ok=True)
+
+    # 关键修复：每次启动清理 WebView2 的 HTTP 缓存目录（保留 localStorage/Cookie/state.json），
+    # 防止修改前端代码后旧版本 JS/CSS 被缓存导致看不到新功能。
+    # WebView2 缓存位于 <storage_path>/EBWebView/Default/Cache
+    cache_dir = os.path.join(storage_path, 'EBWebView', 'Default', 'Cache')
+    if os.path.exists(cache_dir):
+        try:
+            shutil.rmtree(cache_dir, ignore_errors=True)
+        except Exception:
+            pass
 
     webview.create_window(
         'MarkTrans',

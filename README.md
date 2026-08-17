@@ -46,6 +46,17 @@
 
 ## 全局功能
 
+### 🔍 查找与替换（专业版悬浮窗）
+
+顶部 🔍 按钮或 `Ctrl+F` / `Ctrl+H` 唤出专业查找替换面板，仿 WPS/Office 交互：
+
+- **Tab 切换**：查找(D) / 替换(P) 两种模式
+- **逐个定位**：上一处(B) / 下一处(F) 高亮选区，支持环绕查找
+- **替换当前**：逐个替换选中的匹配项，替换后自动跳到下一处
+- **全部替换**：一键批量替换，支持三个模式
+- **可拖拽悬浮窗**：面板可自由移动到任意位置，`Esc` 快速关闭
+- **模式隔离**：仅作用于当前激活的模式（Tab）
+
 ### 🌙 暗黑模式
 
 顶部一键切换 🌙/☀️，全界面联动换肤：导航栏、编辑区、预览区、AI 面板、卡片全部适配。主题选择持久化到 `~/.marktrans_data/state.json`，重启自动恢复。
@@ -69,6 +80,8 @@
 <img width="1920" height="1020" alt="image" src="https://github.com/user-attachments/assets/e365de67-5f37-4356-a47c-fe0c11031fc4" />
 
 
+- **上下文感知自动改写**：AI 自动读取当前正文，对翻译/重写/修改请求直接修改原文
+- **一键撤销**：修改后 AI 面板头部出现 🔙 撤销按钮，点击即可恢复修改前的内容
 - **OpenAI 兼容接口**：支持自定义 Base URL / API Key / Model（兼容 OpenAI、DeepSeek、Moonshot 等）
 - **后端代理**：通过 Python `urllib` 转发请求，彻底规避浏览器 CORS 跨域限制
 - **对话持久化**：聊天历史和 API 配置均存入 `state.json`（Python 侧持久化）
@@ -144,14 +157,16 @@ python main.py
 MarkTrans/
 ├── frontend/
 │   ├── src/
-│   │   ├── App.vue          # 主组件（三模式 + AI 助手 + 暗黑模式 + 卡片布局）
+│   │   ├── assets/
+│   │   │   └── MT.png            # 软件品牌图标
+│   │   ├── App.vue          # 主组件（三模式 + AI 助手 + 暗黑模式 + 查找替换 + 卡片布局）
 │   │   ├── main.js          # Vue 入口
 │   │   └── style.css        # 全局样式
 │   ├── index.html
 │   ├── vite.config.js       # outDir → ../backend/dist
 │   └── package.json
 ├── backend/
-│   ├── main.py              # pywebview 入口 + Api 类（导出/转换/AI 代理/状态持久化）
+│   ├── main.py              # pywebview 入口 + Api 类（导出/转换/AI 代理/状态持久化/WebView2 缓存清理）
 │   ├── requirements.txt
 │   └── dist/                # 前端构建产物（gitignore）
 ├── release/                 # PyInstaller 产物（gitignore）

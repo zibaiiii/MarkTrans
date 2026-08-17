@@ -9,6 +9,8 @@ import 'vditor/dist/index.css'
 // 引入本地样式，彻底解决桌面端因网络限制导致的断网/样式错乱问题
 import 'katex/dist/katex.min.css'
 import 'github-markdown-css/github-markdown.css'
+// 软件图标（来自 src/assets/MT.png）
+import logoImg from './assets/MT.png'
 
 // 初始化 markdown-it，并启用 KaTeX 公式插件
 const md = new MarkdownIt({
@@ -154,21 +156,56 @@ const sendAiMessage = async () => {
 
   try {
     if (window.pywebview && window.pywebview.api) {
-      // 交给不具备跨域限制的 Python 后端去发请求
+      // 1. 获取当前正在编辑的文本上下文
+      let currentText = ''
+      if (activeTab.value === 'md2doc') currentText = markdownContent.value
+      else if (activeTab.value === 'rtf2md' && vditor.value) currentText = vditor.value.getValue()
+      else if (activeTab.value === 'md2excel') currentText = excelContent.value
+
+      // 2. 构造强制性系统约束 Prompt
+      const systemPrompt = {
+        role: 'system',
+        content: `你是一个智能Copilot文档助手。当前用户正在工作的文本内容是：\n\n---\n${currentText}\n---\n如果用户要求你对文章进行翻译、重写或修改，请你**必须**将修改后完整的最新全文严格包裹在<<<<UPDATE_START>>>>和<<<<UPDATE_END>>>>这两个标记符之间。除了修改后的全文外，不要在标记内写任何废话。如果只是普通问答，则不要使用此标记。`
+      }
+
+      // 3. 将 system 注入到请求的最前面，不显示在前端给用户看
+      const requestMessages = [systemPrompt, ...aiMessages.value]
+
       const res = await window.pywebview.api.chat_with_ai(
         aiConfig.value.baseUrl,
         aiConfig.value.apiKey,
         aiConfig.value.model,
-        aiMessages.value
+        requestMessages
       )
 
       if (res.success) {
-        aiMessages.value.push({ role: 'assistant', content: res.reply })
+        let finalReply = res.reply
+
+        // 4. 正则拦截与自动修改魔法
+        const updateRegex = /<<<<UPDATE_START>>>>([\s\S]*?)<<<<UPDATE_END>>>>/
+        const match = finalReply.match(updateRegex)
+
+        if (match) {
+          const newContent = match[1].trim()
+
+          // 保存撤销快照 (后悔药)
+          aiUndoSnapshot.value = { tab: activeTab.value, content: currentText }
+
+          // 强行覆盖当前模式的输入框！
+          if (activeTab.value === 'md2doc') markdownContent.value = newContent
+          else if (activeTab.value === 'rtf2md' && vditor.value) vditor.value.setValue(newContent)
+          else if (activeTab.value === 'md2excel') excelContent.value = newContent
+
+          // 将 AI 回复里的长篇巨论替换为一句简短的提示
+          finalReply = finalReply.replace(updateRegex, '\n\n*(✨ 已自动将修改后的最新内容同步至当前正文)*\n\n')
+        }
+
+        aiMessages.value.push({ role: 'assistant', content: finalReply })
       } else {
         throw new Error(res.error)
       }
     } else {
-      throw new Error("请在桌面客户端环境运行该功能！")
+      throw new Error('请在桌面客户端环境运行该功能！')
     }
   } catch (error) {
     aiMessages.value.push({ role: 'assistant', content: `[接口返回错误] \n${error.message}` })
@@ -177,6 +214,20 @@ const sendAiMessage = async () => {
   }
 }
 const clearAiMessages = () => { aiMessages.value = [] }
+
+// ================= AI 自动改写撤销快照 =================
+const aiUndoSnapshot = ref(null)
+
+const undoAiEdit = () => {
+  if (!aiUndoSnapshot.value) return
+  const { tab, content } = aiUndoSnapshot.value
+  if (tab === 'md2doc') markdownContent.value = content
+  else if (tab === 'rtf2md' && vditor.value) vditor.value.setValue(content)
+  else if (tab === 'md2excel') excelContent.value = content
+
+  aiUndoSnapshot.value = null
+  aiMessages.value.push({ role: 'assistant', content: '🔙 已为您撤销刚才的自动修改。' })
+}
 
 // ================= AI 面板拖拽与样式状态 =================
 const aiPanelStyle = ref({
@@ -493,6 +544,162 @@ onUnmounted(() => {
   }
   vditor.value = null
 })
+
+// ================= 专业查找与替换逻辑 =================
+const showFindReplace = ref(false)
+const frMode = ref('find') // 'find' | 'replace'
+const findText = ref('')
+const replaceText = ref('')
+
+// 定义输入框的 DOM 引用
+const mdTextareaRef = ref(null)
+const excelTextareaRef = ref(null)
+
+// 查找替换悬浮窗位置样式（可自由拖动）
+const frPanelStyle = ref({
+  top: '120px',
+  left: 'auto',
+  right: '60px'
+})
+
+// 查找替换面板独立的拖拽状态（与 AI 面板解耦，避免互相干扰）
+let isFrDragging = false
+let frStartX = 0, frStartY = 0, frInitialLeft = 0, frInitialTop = 0
+
+const startFrDrag = (e) => {
+  // 点击按钮、tab、输入框时不触发拖拽
+  const tag = e.target.tagName.toLowerCase()
+  if (tag === 'button' || tag === 'input' || tag === 'label') return
+  // 点击 tab 也不拖拽
+  if (e.target.classList && e.target.classList.contains('fr-tab-item')) return
+
+  isFrDragging = true
+  frStartX = e.clientX
+  frStartY = e.clientY
+
+  const panel = document.querySelector('.find-replace-panel')
+  if (!panel) return
+  const rect = panel.getBoundingClientRect()
+  frInitialLeft = rect.left
+  frInitialTop = rect.top
+
+  // 转为绝对定位以便平滑拖拽
+  frPanelStyle.value.top = `${frInitialTop}px`
+  frPanelStyle.value.left = `${frInitialLeft}px`
+  frPanelStyle.value.right = 'auto'
+
+  document.addEventListener('mousemove', onFrDrag)
+  document.addEventListener('mouseup', stopFrDrag)
+}
+
+const onFrDrag = (e) => {
+  if (!isFrDragging) return
+  const dx = e.clientX - frStartX
+  const dy = e.clientY - frStartY
+  frPanelStyle.value.left = `${frInitialLeft + dx}px`
+  frPanelStyle.value.top = `${frInitialTop + dy}px`
+}
+
+const stopFrDrag = () => {
+  isFrDragging = false
+  document.removeEventListener('mousemove', onFrDrag)
+  document.removeEventListener('mouseup', stopFrDrag)
+}
+
+// 获取当前激活文本框和内容的辅助函数
+const getActiveEditorInfo = () => {
+  if (activeTab.value === 'md2doc') return { el: mdTextareaRef.value, text: markdownContent.value, setter: (val) => markdownContent.value = val }
+  if (activeTab.value === 'md2excel') return { el: excelTextareaRef.value, text: excelContent.value, setter: (val) => excelContent.value = val }
+  return null
+}
+
+// 拦截原生 Ctrl+F / Ctrl+H
+// 使用 capture: true 在捕获阶段拦截，避免 Vditor 等子组件 stopPropagation 吞掉事件
+onMounted(() => {
+  window.addEventListener('keydown', (e) => {
+    if (e.ctrlKey || e.metaKey) {
+      if (e.key.toLowerCase() === 'f') { e.preventDefault(); e.stopPropagation(); showFindReplace.value = true; frMode.value = 'find' }
+      if (e.key.toLowerCase() === 'h') { e.preventDefault(); e.stopPropagation(); showFindReplace.value = true; frMode.value = 'replace' }
+    }
+    if (e.key === 'Escape') showFindReplace.value = false
+  }, true)
+})
+
+// 查找下一处
+const findNext = () => {
+  if (!findText.value) return
+  const info = getActiveEditorInfo()
+  if (!info) { alert('富文本模式不支持原生逐个定位，请使用全部替换或切回源码模式'); return }
+
+  const el = info.el
+  const currentPos = el.selectionEnd || 0
+  let index = info.text.indexOf(findText.value, currentPos)
+
+  if (index === -1) {
+    index = info.text.indexOf(findText.value, 0) // 从头开始找
+    if (index === -1) { alert('未找到匹配内容'); return }
+  }
+
+  el.focus()
+  el.setSelectionRange(index, index + findText.value.length)
+}
+
+// 查找上一处
+const findPrev = () => {
+  if (!findText.value) return
+  const info = getActiveEditorInfo()
+  if (!info) return
+
+  const el = info.el
+  const currentPos = el.selectionStart || info.text.length
+  let index = info.text.lastIndexOf(findText.value, currentPos - 1 - findText.value.length)
+
+  if (index === -1) {
+    index = info.text.lastIndexOf(findText.value) // 从末尾找
+  }
+
+  if (index !== -1) {
+    el.focus()
+    el.setSelectionRange(index, index + findText.value.length)
+  }
+}
+
+// 替换当前选中处
+const replaceCurrent = () => {
+  const info = getActiveEditorInfo()
+  if (!info) return
+  const el = info.el
+
+  const start = el.selectionStart
+  const end = el.selectionEnd
+  const selectedText = info.text.substring(start, end)
+
+  if (selectedText === findText.value) {
+    const newVal = info.text.substring(0, start) + replaceText.value + info.text.substring(end)
+    info.setter(newVal)
+    // 强制 Vue 更新 DOM 后恢复光标并找下一个
+    setTimeout(() => {
+      el.setSelectionRange(start, start + replaceText.value.length)
+      findNext()
+    }, 0)
+  } else {
+    findNext() // 如果当前没选中匹配项，先跳过去
+  }
+}
+
+// 全部替换
+const performReplaceAll = () => {
+  if (!findText.value) return
+  const target = findText.value
+  const replacement = replaceText.value
+
+  if (activeTab.value === 'md2doc') markdownContent.value = markdownContent.value.split(target).join(replacement)
+  else if (activeTab.value === 'md2excel') excelContent.value = excelContent.value.split(target).join(replacement)
+  else if (activeTab.value === 'rtf2md' && vditor.value) {
+    vditor.value.setValue(vditor.value.getValue().split(target).join(replacement))
+  }
+  alert('批量替换完成！')
+}
 </script>
 
 <template>
@@ -500,7 +707,13 @@ onUnmounted(() => {
     <!-- ================= 顶部全局导航栏 ================= -->
     <header class="global-navbar">
       <div class="logo-area">
-        <span class="logo-text" @click="showTutorial = true" title="点击查看使用教程">MarkTrans</span>
+        <div class="logo-brand" @click="showTutorial = true" title="点击查看使用教程">
+          <img :src="logoImg" alt="MarkTrans" class="logo-icon" />
+          <span class="logo-text">MarkTrans</span>
+        </div>
+        <button class="theme-toggle-btn" @click="showFindReplace = !showFindReplace" title="查找与替换 (Ctrl+F)">
+          🔍
+        </button>
         <button class="theme-toggle-btn" @click="isDarkMode = !isDarkMode" :title="isDarkMode ? '切换至亮色模式' : '切换至夜间模式'">
           {{ isDarkMode ? '☀️' : '🌙' }}
         </button>
@@ -558,12 +771,12 @@ onUnmounted(() => {
             <div class="upload-text">点击选择本地 Markdown / TXT 文件</div>
             <div class="upload-subtext">也支持直接在此处下方粘贴内容（本地处理，绝对隐私）</div>
           </div>
-          <textarea v-model="markdownContent" class="md-textarea" :placeholder="mdPlaceholder" spellcheck="false"></textarea>
+          <textarea ref="mdTextareaRef" v-model="markdownContent" class="md-textarea" :placeholder="mdPlaceholder" spellcheck="false"></textarea>
         </div>
 
         <div class="preview-section card-style">
           <div class="card-header">
-            <span class="card-title">👁️ 实时预览</span>
+            <span class="card-title">实时预览</span>
             <div class="card-actions">
               <button class="btn-export html" @click="exportFile('html')">导出 HTML</button>
               <button class="btn-export docx" @click="exportFile('docx')">导出 Docx</button>
@@ -591,11 +804,11 @@ onUnmounted(() => {
             <div class="upload-text">点击选择本地 Markdown / TXT 文件</div>
             <div class="upload-subtext">普通文字会被自动忽略，仅提取表格导出</div>
           </div>
-          <textarea v-model="excelContent" class="md-textarea" :placeholder="excelPlaceholder" spellcheck="false"></textarea>
+          <textarea ref="excelTextareaRef" v-model="excelContent" class="md-textarea" :placeholder="excelPlaceholder" spellcheck="false"></textarea>
         </div>
         <div class="preview-section card-style">
           <div class="card-header">
-            <span class="card-title">👁️ 表格预览</span>
+            <span class="card-title">表格预览</span>
             <div class="card-actions">
               <button class="btn-export" style="background-color: #f39c12;" @click="exportFile('csv')">导出 CSV</button>
               <button class="btn-export" style="background-color: #217346;" @click="exportFile('xlsx')">导出 Excel</button>
@@ -614,6 +827,7 @@ onUnmounted(() => {
       <div class="ai-header" @mousedown="startDrag">
         <div class="header-title">🤖 AI 助手</div>
         <div class="ai-header-actions">
+          <button v-show="aiUndoSnapshot" @click="undoAiEdit" title="撤销 AI 的上一笔文章修改" style="color: #ff9800;">🔙 撤销修改</button>
           <button @click="clearAiMessages" title="清空对话">🗑️</button>
           <button @click="showAiSettings = !showAiSettings" title="设置 API">⚙️</button>
           <button @click="isAiOpen = false">✖</button>
@@ -663,33 +877,83 @@ onUnmounted(() => {
     <div v-show="showTutorial" class="tutorial-overlay" @click.self="showTutorial = false">
       <div class="tutorial-modal">
         <div class="tutorial-header">
-          <h2>🚀 MarkTrans 核心使用指南</h2>
+          <h2>🚀 MarkTrans 使用指南</h2>
           <button class="close-btn" @click="showTutorial = false">✖</button>
         </div>
         <div class="tutorial-content">
-          <h3>1. 👨‍💻 模式一：Markdown 编辑与终态导出（代码流）</h3>
+          <h3>� 模式一 · Markdown 编辑与导出</h3>
           <ul>
-            <li><strong>一键多格式导出：</strong> 在右侧预览区右上角，可由源码一键提取为 <strong>PDF、Word、HTML 以及 PPT</strong>。</li>
-            <li><strong>PPT 分页技巧：</strong> 导出 PPT 时，系统按一级标题(<code>#</code>)或二级标题(<code>##</code>)自动切页，你也可使用分割线(<code>---</code>)强行分页。勾选右上方【PPT 辅助线】可实时查看分页断层。</li>
+            <li><strong>实时预览：</strong> 左侧书写源码，右侧即时渲染 Typora 风格排版与 KaTeX 数学公式。</li>
+            <li><strong>四格式导出：</strong> 右上角一键导出 <code>HTML</code> / <code>Word</code> / <code>PDF</code> / <code>PPT</code>。</li>
+            <li><strong>PPT 分页：</strong> 按 <code>##</code> 二级标题自动切页；勾选【PPT 辅助线】可预览分页位置。</li>
+            <li><strong>导入文件：</strong> 点击虚线上传区可导入 <code>.md</code> / <code>.txt</code> / <code>.docx</code>（Word 自动转 Markdown）。</li>
           </ul>
 
-          <h3>2. 🎨 模式二：文字转 Markdown（富文本流）</h3>
+          <h3>🎨 模式二 · 文字转 Markdown（Vditor 富文本）</h3>
           <ul>
-            <li><strong>逆向剥离：</strong> 点击左上的【导入文件】，上传别人的 `.docx` Word 文档，它会在底层被瞬间洗成极其极其纯净的 Markdown 源码！</li>
-            <li><strong>纯离线防丢图：</strong> 直接 Ctrl+V 粘贴电脑截图，图片会被瞬间提取为 <strong>Base64 编码文本</strong>写进底层。告别图床，完全离线化阅读。</li>
+            <li><strong>所见即所得：</strong> 像 Word 一样排版，底层自动生成标准 Markdown 源码。</li>
+            <li><strong>离线防丢图：</strong> <code>Ctrl+V</code> 粘贴图片会自动转 Base64 嵌入文档，无需图床。</li>
+            <li><strong>快捷公式：</strong> 输入 <code>$$</code> 唤出公式编辑器，支持 <code>Ctrl+B</code> 加粗等原生快捷键。</li>
           </ul>
 
-          <h3>3. 📊 模式三：Markdown 转 Excel（数据流）</h3>
+          <h3>📊 模式三 · Markdown 转 Excel</h3>
           <ul>
-            <li>将混杂在文字中的 Markdown 表格粘贴进来，系统会自动屏蔽多余废话，一键精准剥离成 <code>.xlsx</code> 或 <code>.csv</code> 文件。</li>
+            <li>粘贴含表格的 Markdown 文本，自动忽略非表格文字，精准剥离为 <code>.xlsx</code> / <code>.csv</code>。</li>
           </ul>
 
-          <h3>4. ✨ AI Co-pilot 与暗黑模式</h3>
+          <h3>🔍 查找与替换</h3>
           <ul>
-            <li>点击最左下角的魔法棒唤出面板，在 ⚙️ 设置中输入提供商的 API 即可使用沉浸式 AI 问答，支持文本代码一键复制。</li>
-            <li>点击顶部 🌙 图标，即可开启全局联动的极客护眼模式。</li>
+            <li><strong>快捷键：</strong> <code>Ctrl+F</code> 查找 / <code>Ctrl+H</code> 替换 / <code>Esc</code> 关闭。</li>
+            <li><strong>逐个定位：</strong> 上一处 / 下一处高亮选区；【替换】逐个替换当前匹配。</li>
+            <li><strong>悬浮窗：</strong> 面板可拖拽到任意位置，仅作用于当前激活的模式。</li>
+          </ul>
+
+          <h3>🤖 AI 助手（左下角魔法棒）</h3>
+          <ul>
+            <li><strong>上下文感知：</strong> AI 会自动读取当前正文，对翻译/重写请求直接修改原文。</li>
+            <li><strong>一键撤销：</strong> 点击 🔙 撤销按钮可恢复 AI 修改前的内容。</li>
+            <li><strong>设置：</strong> ⚙️ 中配置 OpenAI 标准接口（API Key / Base URL / 模型名）。</li>
+          </ul>
+
+          <h3>💾 数据持久化与主题</h3>
+          <ul>
+            <li><strong>自动保存：</strong> 所有内容实时写入 <code>~/.marktrans_data/state.json</code>，关闭程序不丢失。</li>
+            <li><strong>暗黑模式：</strong> 点击 🌙 切换全局主题，状态自动记忆。</li>
           </ul>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 专业版查找替换面板（可拖拽悬浮窗） ================= -->
+  <div v-show="showFindReplace" class="find-replace-panel card-style" :style="frPanelStyle">
+    <div class="fr-header" @mousedown="startFrDrag">
+      <div class="fr-tabs">
+        <span class="fr-tab-item" :class="{ active: frMode === 'find' }" @click="frMode = 'find'" @mousedown.stop>查找(D)</span>
+        <span class="fr-tab-item" :class="{ active: frMode === 'replace' }" @click="frMode = 'replace'" @mousedown.stop>替换(P)</span>
+      </div>
+      <button class="fr-close" @click="showFindReplace = false" @mousedown.stop>✖</button>
+    </div>
+
+    <div class="fr-body">
+      <div class="fr-row">
+        <label>查找内容(N)</label>
+        <input v-model="findText" placeholder="输入要查找的文本..." class="fr-input" @keyup.enter="findNext" />
+      </div>
+      <div class="fr-row" v-show="frMode === 'replace'">
+        <label>替换为(I)</label>
+        <input v-model="replaceText" class="fr-input" />
+      </div>
+    </div>
+
+    <div class="fr-footer">
+      <div class="fr-actions-left" v-show="frMode === 'replace'">
+        <button class="fr-btn-outline" @click="replaceCurrent">替换(R)</button>
+        <button class="fr-btn-outline" @click="performReplaceAll">全部替换(A)</button>
+      </div>
+      <div class="fr-actions-right">
+        <button class="fr-btn-outline" @click="findPrev">上一处(B)</button>
+        <button class="fr-btn" @click="findNext">下一处(F)</button>
       </div>
     </div>
   </div>
@@ -746,6 +1010,25 @@ html, body {
   display: flex;
   align-items: center;
   gap: 20px;
+}
+
+.logo-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  transition: opacity 0.2s;
+}
+.logo-brand:hover {
+  opacity: 0.8;
+}
+
+.logo-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  object-fit: cover;
 }
 
 .logo-text {
@@ -1183,7 +1466,7 @@ main {
   border-radius: 12px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
   border: 1px solid #eef1f5;
-  display: flex !important;
+  display: flex;
   flex-direction: column;
   overflow: hidden;
   border-right: none !important;
@@ -1397,4 +1680,47 @@ html[data-theme="dark"] .tutorial-header h2 { color: #eee; }
 html[data-theme="dark"] .tutorial-content { color: #ccc; }
 html[data-theme="dark"] .tutorial-content h3 { color: #61dafb; border-color: #333; }
 html[data-theme="dark"] .tutorial-content strong { color: #eee; }
+
+/* ================= 专业查找替换面板样式 ================= */
+.find-replace-panel {
+  position: fixed; top: 120px; right: 60px; width: 380px;
+  background: #fbfbfb; border: 1px solid #dcdcdc; border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.15); z-index: 1000;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.fr-header {
+  display: flex; justify-content: space-between; align-items: flex-end;
+  padding: 10px 15px 0 15px; background: #f0f0f0; border-bottom: 1px solid #ddd;
+  cursor: move; /* 悬浮窗头部可拖拽 */
+  user-select: none;
+}
+.fr-tabs { display: flex; gap: 15px; }
+.fr-tabs span {
+  padding: 8px 5px; cursor: pointer; color: #555; font-size: 13px; font-weight: 500;
+  border-bottom: 2px solid transparent; user-select: none;
+}
+.fr-tabs span.active { color: #0072ff; border-bottom-color: #0072ff; font-weight: bold; }
+.fr-close { padding-bottom: 8px; background: none; border: none; cursor: pointer; color: #888; font-size: 14px; }
+.fr-close:hover { color: #d32f2f; }
+.fr-body { padding: 15px 20px; display: flex; flex-direction: column; gap: 12px; }
+.fr-row { display: flex; align-items: center; gap: 10px; }
+.fr-row label { width: 80px; font-size: 13px; color: #333; text-align: right; }
+.fr-input { flex: 1; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; outline: none; }
+.fr-input:focus { border-color: #0072ff; }
+.fr-footer { display: flex; justify-content: space-between; padding: 12px 20px; background: #f5f5f5; border-top: 1px solid #eee; }
+.fr-actions-left, .fr-actions-right { display: flex; gap: 8px; }
+.fr-btn, .fr-btn-outline { padding: 6px 14px; font-size: 12px; border-radius: 4px; cursor: pointer; font-weight: 500; transition: all 0.2s; }
+.fr-btn { background: #0072ff; color: #fff; border: 1px solid #0072ff; }
+.fr-btn:hover { background: #005bb5; }
+.fr-btn-outline { background: #fff; color: #333; border: 1px solid #ccc; }
+.fr-btn-outline:hover { background: #e9e9e9; }
+
+/* 适配暗黑模式 */
+html[data-theme="dark"] .find-replace-panel { background: #252526; border-color: #444; }
+html[data-theme="dark"] .fr-header, html[data-theme="dark"] .fr-footer { background: #1e1e1e; border-color: #333; }
+html[data-theme="dark"] .fr-row label, html[data-theme="dark"] .fr-tabs span { color: #ccc; }
+html[data-theme="dark"] .fr-tabs span.active { color: #61dafb; border-color: #61dafb; }
+html[data-theme="dark"] .fr-input { background: #333; color: #fff; border-color: #555; }
+html[data-theme="dark"] .fr-btn-outline { background: #333; color: #ddd; border-color: #555; }
+html[data-theme="dark"] .fr-btn-outline:hover { background: #444; }
 </style>
